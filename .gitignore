@@ -1,0 +1,41 @@
+# Build results
+bin/
+obj/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# User-specific files
+*.rsuser
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+
+# IDE
+.idea/
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Local environment settings
+appsettings.local.json
+appsettings.*.local.json
+.env
+.env.*
+
+# Secrets
+secrets.json
