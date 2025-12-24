@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using bixo_api.Models.DTOs.Candidate;
 using bixo_api.Models.DTOs.Common;
+using bixo_api.Models.DTOs.Message;
 using bixo_api.Services.Interfaces;
 using System.Security.Claims;
 
@@ -14,11 +15,16 @@ public class CandidatesController : ControllerBase
 {
     private readonly ICandidateService _candidateService;
     private readonly INotificationService _notificationService;
+    private readonly IMessageService _messageService;
 
-    public CandidatesController(ICandidateService candidateService, INotificationService notificationService)
+    public CandidatesController(
+        ICandidateService candidateService,
+        INotificationService notificationService,
+        IMessageService messageService)
     {
         _candidateService = candidateService;
         _notificationService = notificationService;
+        _messageService = messageService;
     }
 
     private Guid GetUserId() =>
@@ -167,6 +173,20 @@ public class CandidatesController : ControllerBase
         await _notificationService.MarkAllAsReadAsync(GetUserId());
         return Ok(ApiResponse.Ok("All notifications marked as read"));
     }
+
+    [HttpGet("messages/unread-count")]
+    public async Task<ActionResult<ApiResponse<UnreadCountResponse>>> GetUnreadMessageCount()
+    {
+        var count = await _messageService.GetUnreadCountAsync(GetUserId());
+        return Ok(ApiResponse<UnreadCountResponse>.Ok(new UnreadCountResponse { UnreadCount = count }));
+    }
+
+    [HttpGet("messages")]
+    public async Task<ActionResult<ApiResponse<List<MessageResponse>>>> GetMessages()
+    {
+        var messages = await _messageService.GetMessagesAsync(GetUserId());
+        return Ok(ApiResponse<List<MessageResponse>>.Ok(messages));
+    }
 }
 
 public class ProcessCvRequest
@@ -178,4 +198,9 @@ public class ProcessCvRequest
 public class SetVisibilityRequest
 {
     public bool Visible { get; set; }
+}
+
+public class UnreadCountResponse
+{
+    public int UnreadCount { get; set; }
 }

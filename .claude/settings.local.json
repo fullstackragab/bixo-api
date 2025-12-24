@@ -6,7 +6,12 @@
       "Bash(dotnet run)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(psql:*)",
+      "Bash(set PGPASSWORD=postgres:*)",
+      "Bash($env:PGPASSWORD='postgres')",
+      "Bash(PGPASSWORD=postgres psql:*)",
+      "Bash(dotnet restore:*)"
     ]
   }
 }

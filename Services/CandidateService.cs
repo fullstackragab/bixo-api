@@ -368,12 +368,20 @@ public class CandidateService : ICandidateService
                     Now = DateTime.UtcNow
                 });
 
+            // Delete old CV-parsed skills (non-verified) before inserting new ones
+            await connection.ExecuteAsync(@"
+                DELETE FROM candidate_skills
+                WHERE candidate_id = @CandidateId AND is_verified = FALSE",
+                new { CandidateId = candidateId });
+
             foreach (var skill in parseResult.Skills)
             {
                 await connection.ExecuteAsync(@"
                     INSERT INTO candidate_skills (id, candidate_id, skill_name, confidence_score, category, is_verified)
                     VALUES (@Id, @CandidateId, @SkillName, @Confidence, @Category, FALSE)
-                    ON CONFLICT (candidate_id, skill_name) DO NOTHING",
+                    ON CONFLICT (candidate_id, skill_name) DO UPDATE SET
+                        confidence_score = EXCLUDED.confidence_score,
+                        category = EXCLUDED.category",
                     new
                     {
                         Id = Guid.NewGuid(),

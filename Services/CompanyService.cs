@@ -623,8 +623,8 @@ public class CompanyService : ICompanyService
     {
         var scoreParts = new List<string>();
 
-        // Base score of 0
-        scoreParts.Add("0");
+        // Base score - use CAST to prevent PostgreSQL interpreting as positional reference
+        scoreParts.Add("CAST(0 AS INTEGER)");
 
         // Remote preference boost (+25)
         if (request.LocationRanking?.PreferRemote == true || request.RemotePreference == RemotePreference.Remote)
@@ -658,25 +658,12 @@ public class CompanyService : ICompanyService
     /// </summary>
     private void AddLocationRankingParameters(DynamicParameters parameters, TalentSearchRequest request)
     {
-        // Add country preference
+        // Add country preference (use null instead of DBNull.Value for Dapper compatibility)
         var preferCountry = request.LocationRanking?.PreferCountry ?? request.Location;
-        if (!string.IsNullOrEmpty(preferCountry))
-        {
-            parameters.Add("PreferCountry", preferCountry);
-        }
-        else
-        {
-            parameters.Add("PreferCountry", DBNull.Value);
-        }
+        parameters.Add("PreferCountry", string.IsNullOrEmpty(preferCountry) ? null : preferCountry);
 
         // Add timezone preference
-        if (!string.IsNullOrEmpty(request.LocationRanking?.PreferTimezone))
-        {
-            parameters.Add("PreferTimezone", request.LocationRanking.PreferTimezone);
-        }
-        else
-        {
-            parameters.Add("PreferTimezone", DBNull.Value);
-        }
+        var preferTimezone = request.LocationRanking?.PreferTimezone;
+        parameters.Add("PreferTimezone", string.IsNullOrEmpty(preferTimezone) ? null : preferTimezone);
     }
 }

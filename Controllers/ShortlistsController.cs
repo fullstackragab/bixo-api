@@ -3,7 +3,6 @@ using Microsoft.AspNetCore.Mvc;
 using bixo_api.Models.DTOs.Common;
 using bixo_api.Models.DTOs.Shortlist;
 using bixo_api.Services.Interfaces;
-using System.Security.Claims;
 
 namespace bixo_api.Controllers;
 
@@ -15,7 +14,9 @@ public class ShortlistsController : ControllerBase
     private readonly IShortlistService _shortlistService;
     private readonly IPaymentService _paymentService;
 
-    public ShortlistsController(IShortlistService shortlistService, IPaymentService paymentService)
+    public ShortlistsController(
+        IShortlistService shortlistService,
+        IPaymentService paymentService)
     {
         _shortlistService = shortlistService;
         _paymentService = paymentService;

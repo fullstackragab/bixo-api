@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using OpenAI.Chat;
+using UglyToad.PdfPig;
 using bixo_api.Configuration;
 using bixo_api.Models.DTOs.Candidate;
 using bixo_api.Models.Enums;
@@ -57,31 +58,37 @@ public class CvParsingService : ICvParsingService
 
     private async Task<string> ExtractTextFromPdfAsync(Stream fileStream)
     {
-        // For PDF files, we'll read the raw bytes and attempt to extract text
-        // In production, you might want to use a more robust PDF library
         using var memoryStream = new MemoryStream();
         await fileStream.CopyToAsync(memoryStream);
-        var bytes = memoryStream.ToArray();
+        memoryStream.Position = 0;
 
-        // Simple approach: try to find text content in PDF
-        // This is a basic implementation - for production, consider using iTextSharp or similar
-        var content = Encoding.UTF8.GetString(bytes);
-
-        // Extract text between stream/endstream markers (simplified PDF text extraction)
         var sb = new StringBuilder();
-        var textMarkers = new[] { "(", ")", "Tj", "TJ", "/T" };
 
-        // For now, return the raw content that's readable
-        // OpenAI can handle some garbled text and still extract meaning
-        foreach (var c in content)
+        try
         {
-            if (char.IsLetterOrDigit(c) || char.IsWhiteSpace(c) || char.IsPunctuation(c))
+            using var document = PdfDocument.Open(memoryStream);
+
+            foreach (var page in document.GetPages())
             {
-                sb.Append(c);
+                var pageText = page.Text;
+                sb.AppendLine(pageText);
             }
-            else if (c == '\0')
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "PdfPig failed to extract text, falling back to basic extraction");
+
+            // Fallback to basic extraction for corrupted/non-standard PDFs
+            memoryStream.Position = 0;
+            var bytes = memoryStream.ToArray();
+            var content = Encoding.UTF8.GetString(bytes);
+
+            foreach (var c in content)
             {
-                sb.Append(' ');
+                if (char.IsLetterOrDigit(c) || char.IsWhiteSpace(c) || char.IsPunctuation(c))
+                {
+                    sb.Append(c);
+                }
             }
         }
 

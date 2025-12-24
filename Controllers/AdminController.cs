@@ -130,31 +130,261 @@ public class AdminController : ControllerBase
     }
 
     [HttpGet("companies")]
-    public async Task<ActionResult<ApiResponse<List<AdminCompanyResponse>>>> GetCompanies(
+    public async Task<ActionResult<ApiResponse<AdminCompanyPagedResponse>>> GetCompanies(
         [FromQuery] int page = 1,
-        [FromQuery] int pageSize = 20)
+        [FromQuery] int pageSize = 20,
+        [FromQuery] string? search = null,
+        [FromQuery] int? tier = null)
     {
         using var connection = _db.CreateConnection();
 
-        var companies = await connection.QueryAsync<dynamic>(@"
-            SELECT c.id, u.email, c.company_name, c.subscription_tier, c.messages_remaining, c.created_at
+        var whereClause = "WHERE 1=1";
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            whereClause += " AND (c.company_name ILIKE @Search OR u.email ILIKE @Search)";
+        }
+        if (tier.HasValue)
+        {
+            whereClause += " AND c.subscription_tier = @Tier";
+        }
+
+        var countSql = $@"
+            SELECT COUNT(*)
             FROM companies c
             JOIN users u ON u.id = c.user_id
-            ORDER BY c.created_at DESC
-            OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY",
-            new { Offset = (page - 1) * pageSize, PageSize = pageSize });
+            {whereClause}";
 
-        var result = companies.Select(c => new AdminCompanyResponse
+        var totalCount = await connection.ExecuteScalarAsync<int>(countSql,
+            new { Search = $"%{search}%", Tier = tier });
+
+        var sql = $@"
+            SELECT c.id, c.user_id, u.email, c.company_name, c.industry, c.company_size, c.website,
+                   c.subscription_tier, c.subscription_expires_at, c.messages_remaining, c.created_at, u.last_active_at,
+                   (SELECT COUNT(*) FROM shortlist_requests WHERE company_id = c.id) as shortlists_count,
+                   (SELECT COUNT(*) FROM saved_candidates WHERE company_id = c.id) as saved_candidates_count
+            FROM companies c
+            JOIN users u ON u.id = c.user_id
+            {whereClause}
+            ORDER BY c.created_at DESC
+            OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY";
+
+        var companies = await connection.QueryAsync<dynamic>(sql,
+            new { Search = $"%{search}%", Tier = tier, Offset = (page - 1) * pageSize, PageSize = pageSize });
+
+        var items = companies.Select(c => new AdminCompanyResponse
         {
             Id = (Guid)c.id,
+            UserId = (Guid)c.user_id,
+            CompanyName = c.company_name as string ?? string.Empty,
             Email = (string)c.email,
-            CompanyName = (string)c.company_name,
-            SubscriptionTier = (SubscriptionTier)(int)c.subscription_tier,
+            Industry = c.industry as string,
+            CompanySize = c.company_size as string,
+            Website = c.website as string,
+            SubscriptionTier = (int)c.subscription_tier,
+            SubscriptionExpiresAt = c.subscription_expires_at as DateTime?,
             MessagesRemaining = (int)c.messages_remaining,
-            CreatedAt = (DateTime)c.created_at
+            ShortlistsCount = (int)(c.shortlists_count ?? 0),
+            SavedCandidatesCount = (int)(c.saved_candidates_count ?? 0),
+            CreatedAt = (DateTime)c.created_at,
+            LastActiveAt = (DateTime)c.last_active_at
         }).ToList();
 
-        return Ok(ApiResponse<List<AdminCompanyResponse>>.Ok(result));
+        var result = new AdminCompanyPagedResponse
+        {
+            Items = items,
+            TotalCount = totalCount,
+            Page = page,
+            PageSize = pageSize,
+            TotalPages = (int)Math.Ceiling((double)totalCount / pageSize)
+        };
+
+        return Ok(ApiResponse<AdminCompanyPagedResponse>.Ok(result));
+    }
+
+    [HttpPut("companies/{companyId}/messages")]
+    public async Task<ActionResult<ApiResponse>> UpdateCompanyMessages(Guid companyId, [FromBody] UpdateMessagesRequest request)
+    {
+        using var connection = _db.CreateConnection();
+
+        var rowsAffected = await connection.ExecuteAsync(
+            "UPDATE companies SET messages_remaining = @MessagesRemaining, updated_at = @Now WHERE id = @Id",
+            new { MessagesRemaining = request.MessagesRemaining, Now = DateTime.UtcNow, Id = companyId });
+
+        if (rowsAffected == 0)
+        {
+            return NotFound(ApiResponse.Fail("Company not found"));
+        }
+
+        return Ok(ApiResponse.Ok("Messages updated"));
+    }
+
+    [HttpGet("shortlists/{id}")]
+    public async Task<ActionResult<ApiResponse<AdminShortlistDetailResponse>>> GetShortlist(Guid id)
+    {
+        using var connection = _db.CreateConnection();
+
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT s.id, s.company_id, c.company_name, s.role_title, s.tech_stack_required,
+                   s.seniority_required, s.location_preference, s.is_remote, s.additional_notes,
+                   s.status, s.price_paid, s.created_at, s.completed_at,
+                   s.location_country, s.location_city, s.location_timezone,
+                   s.previous_request_id, s.pricing_type, s.follow_up_discount,
+                   (SELECT COUNT(*) FROM shortlist_candidates WHERE shortlist_request_id = s.id) as candidates_count,
+                   (SELECT COUNT(*) FROM shortlist_candidates WHERE shortlist_request_id = s.id AND is_new = TRUE) as new_candidates_count,
+                   (SELECT COUNT(*) FROM shortlist_candidates WHERE shortlist_request_id = s.id AND is_new = FALSE) as repeated_candidates_count
+            FROM shortlist_requests s
+            JOIN companies c ON c.id = s.company_id
+            WHERE s.id = @Id",
+            new { Id = id });
+
+        if (shortlist == null)
+        {
+            return NotFound(ApiResponse.Fail("Shortlist not found"));
+        }
+
+        var candidates = await connection.QueryAsync<dynamic>(@"
+            SELECT sc.id, sc.candidate_id, sc.rank, sc.match_score, sc.match_reason, sc.admin_approved,
+                   sc.is_new, sc.previously_recommended_in, sc.re_inclusion_reason,
+                   ca.first_name, ca.last_name, ca.desired_role, ca.seniority_estimate, ca.availability, u.email
+            FROM shortlist_candidates sc
+            JOIN candidates ca ON ca.id = sc.candidate_id
+            JOIN users u ON u.id = ca.user_id
+            WHERE sc.shortlist_request_id = @Id
+            ORDER BY sc.rank",
+            new { Id = id });
+
+        // Get skills for each candidate
+        var candidateIds = candidates.Select(c => (Guid)c.candidate_id).ToList();
+        var allSkills = new Dictionary<Guid, List<string>>();
+        if (candidateIds.Any())
+        {
+            var skills = await connection.QueryAsync<dynamic>(@"
+                SELECT candidate_id, skill_name
+                FROM candidate_skills
+                WHERE candidate_id = ANY(@CandidateIds)
+                ORDER BY confidence_score DESC",
+                new { CandidateIds = candidateIds.ToArray() });
+
+            foreach (var skill in skills)
+            {
+                var candidateId = (Guid)skill.candidate_id;
+                if (!allSkills.ContainsKey(candidateId))
+                    allSkills[candidateId] = new List<string>();
+                allSkills[candidateId].Add((string)skill.skill_name);
+            }
+        }
+
+        // Get chain of previous shortlists
+        var chain = new List<ShortlistChainItem>();
+        var previousRequestId = shortlist.previous_request_id as Guid?;
+        if (previousRequestId.HasValue)
+        {
+            var chainItems = await connection.QueryAsync<dynamic>(@"
+                WITH RECURSIVE shortlist_chain AS (
+                    SELECT id, role_title, created_at, previous_request_id,
+                           (SELECT COUNT(*) FROM shortlist_candidates WHERE shortlist_request_id = sr.id) as candidates_count
+                    FROM shortlist_requests sr
+                    WHERE id = @PreviousId
+                    UNION ALL
+                    SELECT sr.id, sr.role_title, sr.created_at, sr.previous_request_id,
+                           (SELECT COUNT(*) FROM shortlist_candidates WHERE shortlist_request_id = sr.id) as candidates_count
+                    FROM shortlist_requests sr
+                    JOIN shortlist_chain sc ON sr.id = sc.previous_request_id
+                )
+                SELECT id, role_title, created_at, candidates_count FROM shortlist_chain
+                ORDER BY created_at DESC",
+                new { PreviousId = previousRequestId.Value });
+
+            chain = chainItems.Select(c => new ShortlistChainItem
+            {
+                Id = (Guid)c.id,
+                RoleTitle = (string)c.role_title,
+                CreatedAt = (DateTime)c.created_at,
+                CandidatesCount = (int)(c.candidates_count ?? 0)
+            }).ToList();
+        }
+
+        // Parse tech stack from JSON
+        var techStack = new List<string>();
+        if (shortlist.tech_stack_required != null)
+        {
+            try
+            {
+                var json = shortlist.tech_stack_required.ToString();
+                techStack = System.Text.Json.JsonSerializer.Deserialize<List<string>>(json) ?? new List<string>();
+            }
+            catch { }
+        }
+
+        // Build hiring location
+        var isRemote = (bool)shortlist.is_remote;
+        var locationCountry = shortlist.location_country as string;
+        var locationCity = shortlist.location_city as string;
+        var locationTimezone = shortlist.location_timezone as string;
+
+        AdminHiringLocationResponse? hiringLocation = null;
+        if (isRemote || !string.IsNullOrEmpty(locationCountry) || !string.IsNullOrEmpty(locationCity))
+        {
+            hiringLocation = new AdminHiringLocationResponse
+            {
+                IsRemote = isRemote,
+                Country = locationCountry,
+                City = locationCity,
+                Timezone = locationTimezone
+            };
+        }
+
+        var result = new AdminShortlistDetailResponse
+        {
+            Id = (Guid)shortlist.id,
+            CompanyId = (Guid)shortlist.company_id,
+            CompanyName = (string)shortlist.company_name,
+            RoleTitle = (string)shortlist.role_title,
+            TechStackRequired = techStack,
+            SeniorityRequired = shortlist.seniority_required != null ? (SeniorityLevel?)(int)shortlist.seniority_required : null,
+            LocationPreference = shortlist.location_preference as string,
+            HiringLocation = hiringLocation,
+            RemoteAllowed = isRemote,
+            AdditionalNotes = shortlist.additional_notes as string,
+            Status = (ShortlistStatus)(int)shortlist.status,
+            PricePaid = shortlist.price_paid as decimal?,
+            CreatedAt = (DateTime)shortlist.created_at,
+            CompletedAt = shortlist.completed_at as DateTime?,
+            CandidatesCount = (int)(shortlist.candidates_count ?? 0),
+            PreviousRequestId = shortlist.previous_request_id as Guid?,
+            PricingType = shortlist.pricing_type as string ?? "new",
+            FollowUpDiscount = shortlist.follow_up_discount as decimal? ?? 0,
+            NewCandidatesCount = (int)(shortlist.new_candidates_count ?? 0),
+            RepeatedCandidatesCount = (int)(shortlist.repeated_candidates_count ?? 0),
+            Candidates = candidates.Select(c =>
+            {
+                var candidateId = (Guid)c.candidate_id;
+                var isNew = c.is_new as bool? ?? true;
+                return new AdminShortlistCandidateResponse
+                {
+                    Id = (Guid)c.id,
+                    CandidateId = candidateId,
+                    FirstName = c.first_name as string,
+                    LastName = c.last_name as string,
+                    Email = (string)c.email,
+                    DesiredRole = c.desired_role as string,
+                    SeniorityEstimate = c.seniority_estimate != null ? (SeniorityLevel?)(int)c.seniority_estimate : null,
+                    Availability = c.availability as int? ?? 0,
+                    Rank = c.rank as int? ?? 0,
+                    MatchScore = c.match_score as int? ?? 0,
+                    MatchReason = c.match_reason as string,
+                    AdminApproved = c.admin_approved as bool? ?? false,
+                    Skills = allSkills.ContainsKey(candidateId) ? allSkills[candidateId] : new List<string>(),
+                    IsNew = isNew,
+                    PreviouslyRecommendedIn = c.previously_recommended_in as Guid?,
+                    ReInclusionReason = c.re_inclusion_reason as string,
+                    StatusLabel = isNew ? "New" : "Previously recommended"
+                };
+            }).ToList(),
+            Chain = chain
+        };
+
+        return Ok(ApiResponse<AdminShortlistDetailResponse>.Ok(result));
     }
 
     [HttpGet("shortlists")]
@@ -205,6 +435,34 @@ public class AdminController : ControllerBase
         return Ok(ApiResponse.Ok("Shortlist processing started"));
     }
 
+    [HttpPost("shortlists/{id}/match")]
+    public async Task<ActionResult<ApiResponse>> MatchShortlist(Guid id)
+    {
+        await _shortlistService.ProcessShortlistAsync(id);
+        return Ok(ApiResponse.Ok("Matching started"));
+    }
+
+    [HttpPut("shortlists/{id}/status")]
+    public async Task<ActionResult<ApiResponse>> UpdateShortlistStatus(Guid id, [FromBody] UpdateShortlistStatusRequest request)
+    {
+        using var connection = _db.CreateConnection();
+
+        var completedAt = request.Status == ShortlistStatus.Completed ? DateTime.UtcNow : (DateTime?)null;
+
+        var rowsAffected = await connection.ExecuteAsync(@"
+            UPDATE shortlist_requests
+            SET status = @Status, completed_at = COALESCE(@CompletedAt, completed_at)
+            WHERE id = @Id",
+            new { Status = (int)request.Status, CompletedAt = completedAt, Id = id });
+
+        if (rowsAffected == 0)
+        {
+            return NotFound(ApiResponse.Fail("Shortlist not found"));
+        }
+
+        return Ok(ApiResponse.Ok("Status updated"));
+    }
+
     [HttpPut("shortlists/{id}/rankings")]
     public async Task<ActionResult<ApiResponse>> UpdateRankings(Guid id, [FromBody] UpdateRankingsRequest request)
     {
@@ -212,9 +470,11 @@ public class AdminController : ControllerBase
 
         foreach (var ranking in request.Rankings)
         {
-            await connection.ExecuteAsync(
-                "UPDATE shortlist_candidates SET rank = @Rank, admin_approved = @Approved WHERE id = @Id",
-                new { Rank = ranking.Rank, Approved = ranking.Approved, Id = ranking.Id });
+            await connection.ExecuteAsync(@"
+                UPDATE shortlist_candidates
+                SET rank = @Rank, admin_approved = @AdminApproved
+                WHERE shortlist_request_id = @ShortlistId AND candidate_id = @CandidateId",
+                new { Rank = ranking.Rank, AdminApproved = ranking.AdminApproved, ShortlistId = id, CandidateId = ranking.CandidateId });
         }
 
         return Ok(ApiResponse.Ok("Rankings updated"));
@@ -280,11 +540,33 @@ public class AdminCandidatePagedResponse
 public class AdminCompanyResponse
 {
     public Guid Id { get; set; }
-    public string Email { get; set; } = string.Empty;
+    public Guid UserId { get; set; }
     public string CompanyName { get; set; } = string.Empty;
-    public SubscriptionTier SubscriptionTier { get; set; }
+    public string Email { get; set; } = string.Empty;
+    public string? Industry { get; set; }
+    public string? CompanySize { get; set; }
+    public string? Website { get; set; }
+    public int SubscriptionTier { get; set; }
+    public DateTime? SubscriptionExpiresAt { get; set; }
     public int MessagesRemaining { get; set; }
+    public int ShortlistsCount { get; set; }
+    public int SavedCandidatesCount { get; set; }
     public DateTime CreatedAt { get; set; }
+    public DateTime LastActiveAt { get; set; }
+}
+
+public class AdminCompanyPagedResponse
+{
+    public List<AdminCompanyResponse> Items { get; set; } = new();
+    public int TotalCount { get; set; }
+    public int Page { get; set; }
+    public int PageSize { get; set; }
+    public int TotalPages { get; set; }
+}
+
+public class UpdateMessagesRequest
+{
+    public int MessagesRemaining { get; set; }
 }
 
 public class AdminShortlistResponse
@@ -311,7 +593,96 @@ public class UpdateRankingsRequest
 
 public class RankingUpdate
 {
-    public Guid Id { get; set; }
+    public Guid CandidateId { get; set; }
     public int Rank { get; set; }
-    public bool Approved { get; set; }
+    public bool AdminApproved { get; set; }
+}
+
+public class UpdateShortlistStatusRequest
+{
+    public ShortlistStatus Status { get; set; }
+}
+
+public class AdminShortlistDetailResponse
+{
+    public Guid Id { get; set; }
+    public Guid CompanyId { get; set; }
+    public string CompanyName { get; set; } = string.Empty;
+    public string RoleTitle { get; set; } = string.Empty;
+    public List<string> TechStackRequired { get; set; } = new();
+    public SeniorityLevel? SeniorityRequired { get; set; }
+    public string? LocationPreference { get; set; }
+    public AdminHiringLocationResponse? HiringLocation { get; set; }
+    public bool RemoteAllowed { get; set; }
+    public string? AdditionalNotes { get; set; }
+    public ShortlistStatus Status { get; set; }
+    public decimal? PricePaid { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime? CompletedAt { get; set; }
+    public int CandidatesCount { get; set; }
+    public Guid? PreviousRequestId { get; set; }
+    public string PricingType { get; set; } = "new";
+    public decimal FollowUpDiscount { get; set; }
+    public int NewCandidatesCount { get; set; }
+    public int RepeatedCandidatesCount { get; set; }
+    public bool IsFollowUp => PreviousRequestId.HasValue;
+    public List<AdminShortlistCandidateResponse> Candidates { get; set; } = new();
+    public List<ShortlistChainItem> Chain { get; set; } = new();
+}
+
+public class AdminHiringLocationResponse
+{
+    public bool IsRemote { get; set; }
+    public string? Country { get; set; }
+    public string? City { get; set; }
+    public string? Timezone { get; set; }
+    public string DisplayText => FormatDisplayText();
+
+    private string FormatDisplayText()
+    {
+        if (IsRemote && string.IsNullOrEmpty(Country) && string.IsNullOrEmpty(City))
+            return "Remote";
+
+        var parts = new List<string>();
+        if (!string.IsNullOrEmpty(City) && !string.IsNullOrEmpty(Country))
+            parts.Add($"{City}, {Country}");
+        else if (!string.IsNullOrEmpty(City))
+            parts.Add(City);
+        else if (!string.IsNullOrEmpty(Country))
+            parts.Add(Country);
+
+        if (IsRemote)
+            parts.Add("Remote-friendly");
+
+        return string.Join(" · ", parts);
+    }
+}
+
+public class AdminShortlistCandidateResponse
+{
+    public Guid Id { get; set; }
+    public Guid CandidateId { get; set; }
+    public string? FirstName { get; set; }
+    public string? LastName { get; set; }
+    public string Email { get; set; } = string.Empty;
+    public string? DesiredRole { get; set; }
+    public SeniorityLevel? SeniorityEstimate { get; set; }
+    public int Availability { get; set; }
+    public int Rank { get; set; }
+    public int MatchScore { get; set; }
+    public string? MatchReason { get; set; }
+    public bool AdminApproved { get; set; }
+    public List<string> Skills { get; set; } = new();
+    public bool IsNew { get; set; }
+    public Guid? PreviouslyRecommendedIn { get; set; }
+    public string? ReInclusionReason { get; set; }
+    public string StatusLabel { get; set; } = "New";
+}
+
+public class ShortlistChainItem
+{
+    public Guid Id { get; set; }
+    public string RoleTitle { get; set; } = string.Empty;
+    public DateTime CreatedAt { get; set; }
+    public int CandidatesCount { get; set; }
 }
