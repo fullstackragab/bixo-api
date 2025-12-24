@@ -1,7 +1,7 @@
 using Npgsql;
 using System.Data;
 
-namespace pixo_api.Data;
+namespace bixo_api.Data;
 
 public interface IDbConnectionFactory
 {

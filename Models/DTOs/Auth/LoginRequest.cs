@@ -1,6 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 
-namespace pixo_api.Models.DTOs.Auth;
+namespace bixo_api.Models.DTOs.Auth;
 
 public class LoginRequest
 {

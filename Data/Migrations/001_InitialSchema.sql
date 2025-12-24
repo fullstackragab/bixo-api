@@ -1,4 +1,4 @@
--- Pixo Job Platform - Initial Database Schema
+-- Bixo Job Platform - Initial Database Schema
 -- PostgreSQL
 
 -- Enable UUID extension

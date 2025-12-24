@@ -1,4 +1,4 @@
-namespace pixo_api.Models.DTOs.Common;
+namespace bixo_api.Models.DTOs.Common;
 
 public class ApiResponse<T>
 {

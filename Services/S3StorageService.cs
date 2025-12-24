@@ -2,10 +2,10 @@ using Amazon;
 using Amazon.S3;
 using Amazon.S3.Model;
 using Microsoft.Extensions.Options;
-using pixo_api.Configuration;
-using pixo_api.Services.Interfaces;
+using bixo_api.Configuration;
+using bixo_api.Services.Interfaces;
 
-namespace pixo_api.Services;
+namespace bixo_api.Services;
 
 public class S3StorageService : IS3StorageService
 {

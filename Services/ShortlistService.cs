@@ -1,12 +1,12 @@
 using System.Text.Json;
 using Dapper;
-using pixo_api.Data;
-using pixo_api.Models.DTOs.Shortlist;
-using pixo_api.Models.Entities;
-using pixo_api.Models.Enums;
-using pixo_api.Services.Interfaces;
+using bixo_api.Data;
+using bixo_api.Models.DTOs.Shortlist;
+using bixo_api.Models.Entities;
+using bixo_api.Models.Enums;
+using bixo_api.Services.Interfaces;
 
-namespace pixo_api.Services;
+namespace bixo_api.Services;
 
 public class ShortlistService : IShortlistService
 {
@@ -49,7 +49,7 @@ public class ShortlistService : IShortlistService
         await connection.ExecuteAsync(@"
             INSERT INTO shortlist_requests (id, company_id, role_title, tech_stack_required, seniority_required,
                                            location_preference, remote_allowed, additional_notes, status, created_at)
-            VALUES (@Id, @CompanyId, @RoleTitle, @TechStackRequired, @SeniorityRequired,
+            VALUES (@Id, @CompanyId, @RoleTitle, @TechStackRequired::jsonb, @SeniorityRequired,
                     @LocationPreference, @RemoteAllowed, @AdditionalNotes, @Status, @CreatedAt)",
             new
             {

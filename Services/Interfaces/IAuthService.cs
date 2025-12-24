@@ -1,6 +1,6 @@
-using pixo_api.Models.DTOs.Auth;
+using bixo_api.Models.DTOs.Auth;
 
-namespace pixo_api.Services.Interfaces;
+namespace bixo_api.Services.Interfaces;
 
 public interface IAuthService
 {

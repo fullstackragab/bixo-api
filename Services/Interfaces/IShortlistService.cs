@@ -1,6 +1,6 @@
-using pixo_api.Models.DTOs.Shortlist;
+using bixo_api.Models.DTOs.Shortlist;
 
-namespace pixo_api.Services.Interfaces;
+namespace bixo_api.Services.Interfaces;
 
 public interface IShortlistService
 {

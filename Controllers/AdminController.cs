@@ -1,12 +1,12 @@
 using Dapper;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using pixo_api.Data;
-using pixo_api.Models.DTOs.Common;
-using pixo_api.Models.Enums;
-using pixo_api.Services.Interfaces;
+using bixo_api.Data;
+using bixo_api.Models.DTOs.Common;
+using bixo_api.Models.Enums;
+using bixo_api.Services.Interfaces;
 
-namespace pixo_api.Controllers;
+namespace bixo_api.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
@@ -42,36 +42,74 @@ public class AdminController : ControllerBase
     }
 
     [HttpGet("candidates")]
-    public async Task<ActionResult<ApiResponse<List<AdminCandidateResponse>>>> GetCandidates(
+    public async Task<ActionResult<ApiResponse<AdminCandidatePagedResponse>>> GetCandidates(
         [FromQuery] int page = 1,
-        [FromQuery] int pageSize = 20)
+        [FromQuery] int pageSize = 20,
+        [FromQuery] string? search = null,
+        [FromQuery] bool? visible = null)
     {
         using var connection = _db.CreateConnection();
 
-        var candidates = await connection.QueryAsync<dynamic>(@"
-            SELECT c.id, u.email, c.first_name, c.last_name, c.profile_visible, c.open_to_opportunities,
-                   c.created_at, u.last_active_at,
-                   (SELECT COUNT(*) FROM candidate_skills WHERE candidate_id = c.id) as skills_count
+        var whereClause = "WHERE 1=1";
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            whereClause += " AND (c.first_name LIKE @Search OR c.last_name LIKE @Search OR u.email LIKE @Search)";
+        }
+        if (visible.HasValue)
+        {
+            whereClause += " AND c.profile_visible = @Visible";
+        }
+
+        var countSql = $@"
+            SELECT COUNT(*)
             FROM candidates c
             JOIN users u ON u.id = c.user_id
-            ORDER BY c.created_at DESC
-            OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY",
-            new { Offset = (page - 1) * pageSize, PageSize = pageSize });
+            {whereClause}";
 
-        var result = candidates.Select(c => new AdminCandidateResponse
+        var totalCount = await connection.ExecuteScalarAsync<int>(countSql,
+            new { Search = $"%{search}%", Visible = visible });
+
+        var sql = $@"
+            SELECT c.id, c.user_id, u.email, c.first_name, c.last_name, c.desired_role,
+                   c.availability, c.seniority_estimate, c.profile_visible, c.created_at, u.last_active_at,
+                   (SELECT COUNT(*) FROM candidate_skills WHERE candidate_id = c.id) as skills_count,
+                   (SELECT COUNT(*) FROM candidate_profile_views WHERE candidate_id = c.id) as profile_views_count
+            FROM candidates c
+            JOIN users u ON u.id = c.user_id
+            {whereClause}
+            ORDER BY c.created_at DESC
+            OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY";
+
+        var candidates = await connection.QueryAsync<dynamic>(sql,
+            new { Search = $"%{search}%", Visible = visible, Offset = (page - 1) * pageSize, PageSize = pageSize });
+
+        var items = candidates.Select(c => new AdminCandidateResponse
         {
             Id = (Guid)c.id,
+            UserId = (Guid)c.user_id,
             Email = (string)c.email,
             FirstName = c.first_name as string,
             LastName = c.last_name as string,
+            DesiredRole = c.desired_role as string,
+            Availability = (Availability)(c.availability ?? 0),
+            SeniorityEstimate = c.seniority_estimate != null ? (SeniorityLevel?)(int)c.seniority_estimate : null,
             ProfileVisible = (bool)c.profile_visible,
-            OpenToOpportunities = (bool)c.open_to_opportunities,
             SkillsCount = (int)(c.skills_count ?? 0),
+            ProfileViewsCount = (int)(c.profile_views_count ?? 0),
             CreatedAt = (DateTime)c.created_at,
             LastActiveAt = (DateTime)c.last_active_at
         }).ToList();
 
-        return Ok(ApiResponse<List<AdminCandidateResponse>>.Ok(result));
+        var result = new AdminCandidatePagedResponse
+        {
+            Items = items,
+            TotalCount = totalCount,
+            Page = page,
+            PageSize = pageSize,
+            TotalPages = (int)Math.Ceiling((double)totalCount / pageSize)
+        };
+
+        return Ok(ApiResponse<AdminCandidatePagedResponse>.Ok(result));
     }
 
     [HttpPut("candidates/{id}/visibility")]
@@ -216,14 +254,27 @@ public class AdminDashboardResponse
 public class AdminCandidateResponse
 {
     public Guid Id { get; set; }
-    public string Email { get; set; } = string.Empty;
+    public Guid UserId { get; set; }
     public string? FirstName { get; set; }
     public string? LastName { get; set; }
+    public string Email { get; set; } = string.Empty;
+    public string? DesiredRole { get; set; }
+    public Availability Availability { get; set; }
+    public SeniorityLevel? SeniorityEstimate { get; set; }
     public bool ProfileVisible { get; set; }
-    public bool OpenToOpportunities { get; set; }
     public int SkillsCount { get; set; }
+    public int ProfileViewsCount { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime LastActiveAt { get; set; }
+}
+
+public class AdminCandidatePagedResponse
+{
+    public List<AdminCandidateResponse> Items { get; set; } = new();
+    public int TotalCount { get; set; }
+    public int Page { get; set; }
+    public int PageSize { get; set; }
+    public int TotalPages { get; set; }
 }
 
 public class AdminCompanyResponse

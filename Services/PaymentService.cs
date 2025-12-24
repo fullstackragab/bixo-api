@@ -1,14 +1,14 @@
 using Dapper;
 using Microsoft.Extensions.Options;
-using pixo_api.Configuration;
-using pixo_api.Data;
-using pixo_api.Models.Entities;
-using pixo_api.Models.Enums;
-using pixo_api.Services.Interfaces;
+using bixo_api.Configuration;
+using bixo_api.Data;
+using bixo_api.Models.Entities;
+using bixo_api.Models.Enums;
+using bixo_api.Services.Interfaces;
 using Stripe;
 using Stripe.Checkout;
 
-namespace pixo_api.Services;
+namespace bixo_api.Services;
 
 public class PaymentService : IPaymentService
 {
@@ -150,7 +150,7 @@ public class PaymentService : IPaymentService
                         },
                         ProductData = new SessionLineItemPriceDataProductDataOptions
                         {
-                            Name = $"Pixo {(string)plan.name} Plan",
+                            Name = $"Bixo {(string)plan.name} Plan",
                             Description = yearly ? "Annual subscription" : "Monthly subscription"
                         }
                     },

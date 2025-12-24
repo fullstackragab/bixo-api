@@ -1,6 +1,6 @@
-using pixo_api.Models.Entities;
+using bixo_api.Models.Entities;
 
-namespace pixo_api.Services.Interfaces;
+namespace bixo_api.Services.Interfaces;
 
 public interface IMatchingService
 {

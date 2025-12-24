@@ -1,6 +1,6 @@
-using pixo_api.Models.Enums;
+using bixo_api.Models.Enums;
 
-namespace pixo_api.Models.DTOs.Shortlist;
+namespace bixo_api.Models.DTOs.Shortlist;
 
 public class ShortlistResponse
 {

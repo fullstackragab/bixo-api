@@ -1,9 +1,9 @@
 using System.Text.Json;
 using Dapper;
-using pixo_api.Data;
-using pixo_api.Services.Interfaces;
+using bixo_api.Data;
+using bixo_api.Services.Interfaces;
 
-namespace pixo_api.Services;
+namespace bixo_api.Services;
 
 public class NotificationService : INotificationService
 {

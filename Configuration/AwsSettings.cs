@@ -1,4 +1,4 @@
-namespace pixo_api.Configuration;
+namespace bixo_api.Configuration;
 
 public class AwsSettings
 {

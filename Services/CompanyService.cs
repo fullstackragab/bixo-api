@@ -1,11 +1,11 @@
 using Dapper;
-using pixo_api.Data;
-using pixo_api.Models.DTOs.Candidate;
-using pixo_api.Models.DTOs.Company;
-using pixo_api.Models.Enums;
-using pixo_api.Services.Interfaces;
+using bixo_api.Data;
+using bixo_api.Models.DTOs.Candidate;
+using bixo_api.Models.DTOs.Company;
+using bixo_api.Models.Enums;
+using bixo_api.Services.Interfaces;
 
-namespace pixo_api.Services;
+namespace bixo_api.Services;
 
 public class CompanyService : ICompanyService
 {

@@ -1,11 +1,11 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using pixo_api.Models.DTOs.Common;
-using pixo_api.Models.DTOs.Message;
-using pixo_api.Services.Interfaces;
+using bixo_api.Models.DTOs.Common;
+using bixo_api.Models.DTOs.Message;
+using bixo_api.Services.Interfaces;
 using System.Security.Claims;
 
-namespace pixo_api.Controllers;
+namespace bixo_api.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]

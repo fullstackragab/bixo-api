@@ -1,6 +1,6 @@
-using pixo_api.Models.Enums;
+using bixo_api.Models.Enums;
 
-namespace pixo_api.Models.DTOs.Company;
+namespace bixo_api.Models.DTOs.Company;
 
 public class TalentResponse
 {

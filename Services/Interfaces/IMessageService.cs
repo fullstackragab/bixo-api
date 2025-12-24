@@ -1,6 +1,6 @@
-using pixo_api.Models.DTOs.Message;
+using bixo_api.Models.DTOs.Message;
 
-namespace pixo_api.Services.Interfaces;
+namespace bixo_api.Services.Interfaces;
 
 public interface IMessageService
 {

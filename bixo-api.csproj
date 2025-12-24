@@ -4,7 +4,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <RootNamespace>pixo_api</RootNamespace>
+    <RootNamespace>bixo_api</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>

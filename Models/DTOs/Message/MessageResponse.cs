@@ -1,4 +1,4 @@
-namespace pixo_api.Models.DTOs.Message;
+namespace bixo_api.Models.DTOs.Message;
 
 public class MessageResponse
 {

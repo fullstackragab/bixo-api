@@ -1,6 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 
-namespace pixo_api.Models.DTOs.Company;
+namespace bixo_api.Models.DTOs.Company;
 
 public class SaveCandidateRequest
 {

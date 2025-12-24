@@ -2,12 +2,12 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using OpenAI.Chat;
-using pixo_api.Configuration;
-using pixo_api.Models.DTOs.Candidate;
-using pixo_api.Models.Enums;
-using pixo_api.Services.Interfaces;
+using bixo_api.Configuration;
+using bixo_api.Models.DTOs.Candidate;
+using bixo_api.Models.Enums;
+using bixo_api.Services.Interfaces;
 
-namespace pixo_api.Services;
+namespace bixo_api.Services;
 
 public class CvParsingService : ICvParsingService
 {

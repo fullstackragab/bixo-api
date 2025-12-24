@@ -1,4 +1,4 @@
-namespace pixo_api.Models.Enums;
+namespace bixo_api.Models.Enums;
 
 public enum UserType
 {

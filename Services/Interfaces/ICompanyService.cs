@@ -1,6 +1,6 @@
-using pixo_api.Models.DTOs.Company;
+using bixo_api.Models.DTOs.Company;
 
-namespace pixo_api.Services.Interfaces;
+namespace bixo_api.Services.Interfaces;
 
 public interface ICompanyService
 {

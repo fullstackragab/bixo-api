@@ -1,4 +1,4 @@
-namespace pixo_api.Models.DTOs.Candidate;
+namespace bixo_api.Models.DTOs.Candidate;
 
 public class CvUploadResponse
 {

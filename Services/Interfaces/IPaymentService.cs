@@ -1,4 +1,4 @@
-namespace pixo_api.Services.Interfaces;
+namespace bixo_api.Services.Interfaces;
 
 public interface IPaymentService
 {

@@ -1,10 +1,12 @@
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
-using pixo_api.Configuration;
-using pixo_api.Data;
-using pixo_api.Services;
-using pixo_api.Services.Interfaces;
+using bixo_api.Configuration;
+using bixo_api.Data;
+using bixo_api.Services;
+using bixo_api.Services.Interfaces;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -18,6 +20,7 @@ builder.Services.Configure<StripeSettings>(builder.Configuration.GetSection("Str
 builder.Services.AddSingleton<IDbConnectionFactory, NpgsqlConnectionFactory>();
 
 // Services
+builder.Services.AddScoped<DatabaseSeeder>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<ICandidateService, CandidateService>();
 builder.Services.AddScoped<ICompanyService, CompanyService>();
@@ -63,12 +66,24 @@ builder.Services.AddCors(options =>
 });
 
 // Controllers
-builder.Services.AddControllers();
+builder.Services.AddControllers()
+    .AddJsonOptions(options =>
+    {
+        options.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+        options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
+    });
 
 // OpenAPI (built-in .NET 10)
 builder.Services.AddOpenApi();
 
 var app = builder.Build();
+
+// Seed database
+using (var scope = app.Services.CreateScope())
+{
+    var seeder = scope.ServiceProvider.GetRequiredService<DatabaseSeeder>();
+    await seeder.SeedAsync();
+}
 
 // Configure the HTTP request pipeline
 if (app.Environment.IsDevelopment())

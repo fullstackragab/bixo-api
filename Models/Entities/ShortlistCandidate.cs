@@ -1,4 +1,4 @@
-namespace pixo_api.Models.Entities;
+namespace bixo_api.Models.Entities;
 
 public class ShortlistCandidate
 {

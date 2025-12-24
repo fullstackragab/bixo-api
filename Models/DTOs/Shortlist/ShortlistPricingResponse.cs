@@ -1,4 +1,4 @@
-namespace pixo_api.Models.DTOs.Shortlist;
+namespace bixo_api.Models.DTOs.Shortlist;
 
 public class ShortlistPricingResponse
 {
