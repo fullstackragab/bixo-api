@@ -28,7 +28,17 @@ public class ShortlistRequest
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? CompletedAt { get; set; }
 
+    // Versioning: Links to previous shortlist request for follow-up chains
+    public Guid? PreviousRequestId { get; set; }
+
+    // Pricing type: 'new', 'follow_up', 'free_regen'
+    public string PricingType { get; set; } = "new";
+
+    // Discount applied for follow-up shortlists
+    public decimal FollowUpDiscount { get; set; } = 0;
+
     // Navigation
     public Company Company { get; set; } = null!;
+    public ShortlistRequest? PreviousRequest { get; set; }
     public ICollection<ShortlistCandidate> Candidates { get; set; } = new List<ShortlistCandidate>();
 }

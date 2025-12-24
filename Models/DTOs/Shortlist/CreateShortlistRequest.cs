@@ -25,6 +25,15 @@ public class CreateShortlistRequest
     public string? AdditionalNotes { get; set; }
 
     /// <summary>
+    /// Optional: Link to a previous shortlist request for follow-up.
+    /// If provided, the system will:
+    /// - Exclude candidates from the previous shortlist by default
+    /// - Apply follow-up pricing discounts
+    /// - Mark the new shortlist as a follow-up
+    /// </summary>
+    public Guid? PreviousRequestId { get; set; }
+
+    /// <summary>
     /// Gets the effective IsRemote value, preferring HiringLocation.IsRemote
     /// </summary>
     public bool GetEffectiveIsRemote()

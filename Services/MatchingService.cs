@@ -18,19 +18,32 @@ public class MatchingService : IMatchingService
     private const int LOCATION_SCORE_TIMEZONE_OVERLAP = 10;
     private const int LOCATION_SCORE_WILLING_TO_RELOCATE = 10;
 
+    // Freshness boost for follow-up shortlists
+    private const int FRESHNESS_BOOST_NEW_CANDIDATE = 10;    // Onboarded since last shortlist
+    private const int FRESHNESS_BOOST_ACTIVE_SINCE = 5;      // Active since last shortlist
+    private const int FRESHNESS_BOOST_PROFILE_UPDATED = 5;   // Profile updated since last shortlist
+    private const int FRESHNESS_BOOST_NEW_RECOMMENDATION = 5; // Received recommendation since last shortlist
+
     public MatchingService(IDbConnectionFactory db)
     {
         _db = db;
     }
 
-    public async Task<List<MatchResult>> FindMatchesAsync(ShortlistRequest request, int maxResults = 15)
+    public async Task<List<MatchResult>> FindMatchesAsync(
+        ShortlistRequest request,
+        int maxResults = 15,
+        HashSet<Guid>? excludeCandidateIds = null,
+        bool isFollowUp = false,
+        DateTime? previousShortlistCreatedAt = null)
     {
         using var connection = _db.CreateConnection();
 
-        // Fetch candidates with their location data
+        // Fetch candidates with their location data and timestamps for freshness scoring
         var candidates = await connection.QueryAsync<dynamic>(@"
             SELECT c.id, c.user_id, c.first_name, c.last_name, c.desired_role, c.seniority_estimate,
                    c.availability, c.location_preference, c.remote_preference, c.profile_visible, c.open_to_opportunities,
+                   c.created_at AS candidate_created_at,
+                   c.updated_at AS candidate_updated_at,
                    u.last_active_at,
                    cl.country AS location_country,
                    cl.city AS location_city,
@@ -50,22 +63,43 @@ public class MatchingService : IMatchingService
             .GroupBy(s => (Guid)s.candidate_id)
             .ToDictionary(g => g.Key, g => g.ToList());
 
-        // Get recommendations for all candidates
+        // Get recommendations for all candidates (with timestamps for freshness)
         var recommendations = await connection.QueryAsync<dynamic>(@"
-            SELECT candidate_id, id
+            SELECT candidate_id, id, created_at
             FROM candidate_recommendations");
 
         var recommendationsDict = recommendations
             .GroupBy(r => (Guid)r.candidate_id)
-            .ToDictionary(g => g.Key, g => g.Count());
+            .ToDictionary(g => g.Key, g => g.ToList());
 
         var results = new List<MatchResult>();
 
         foreach (var candidateData in candidates)
         {
             var candidateId = (Guid)candidateData.id;
+
+            // Skip excluded candidates (from previous shortlists)
+            if (excludeCandidateIds != null && excludeCandidateIds.Contains(candidateId))
+            {
+                continue;
+            }
+
             var candidateSkills = skillsDict.ContainsKey(candidateId) ? skillsDict[candidateId] : new List<dynamic>();
-            var recommendationCount = recommendationsDict.ContainsKey(candidateId) ? recommendationsDict[candidateId] : 0;
+            var candidateRecommendations = recommendationsDict.ContainsKey(candidateId) ? recommendationsDict[candidateId] : new List<dynamic>();
+            var recommendationCount = candidateRecommendations.Count;
+
+            // Get timestamps for freshness scoring
+            var candidateCreatedAt = candidateData.candidate_created_at as DateTime? ?? DateTime.MinValue;
+            var candidateUpdatedAt = candidateData.candidate_updated_at as DateTime? ?? DateTime.MinValue;
+            var lastActiveAt = (DateTime)candidateData.last_active_at;
+
+            // Check for new recommendations since previous shortlist
+            var hasNewRecommendation = false;
+            if (previousShortlistCreatedAt.HasValue)
+            {
+                hasNewRecommendation = candidateRecommendations.Any(r =>
+                    (r.created_at as DateTime?) > previousShortlistCreatedAt.Value);
+            }
 
             var candidate = new
             {
@@ -76,24 +110,36 @@ public class MatchingService : IMatchingService
                 Availability = (Availability)(candidateData.availability ?? 0),
                 LocationPreference = candidateData.location_preference as string,
                 RemotePreference = (RemotePreference)(candidateData.remote_preference ?? 3), // Default to Flexible
-                LastActiveAt = (DateTime)candidateData.last_active_at,
+                LastActiveAt = lastActiveAt,
                 Skills = candidateSkills,
                 RecommendationCount = recommendationCount,
                 // Location data
                 LocationCountry = candidateData.location_country as string,
                 LocationCity = candidateData.location_city as string,
                 LocationTimezone = candidateData.location_timezone as string,
-                WillingToRelocate = candidateData.willing_to_relocate as bool? ?? false
+                WillingToRelocate = candidateData.willing_to_relocate as bool? ?? false,
+                // Freshness data
+                CreatedAt = candidateCreatedAt,
+                UpdatedAt = candidateUpdatedAt,
+                HasNewRecommendation = hasNewRecommendation
             };
 
             var score = CalculateMatchScore(candidate, request);
+
+            // Apply freshness boost for follow-up shortlists
+            if (isFollowUp && previousShortlistCreatedAt.HasValue)
+            {
+                score += CalculateFreshnessBoost(candidate, previousShortlistCreatedAt.Value);
+            }
+
             if (score > 20)
             {
                 results.Add(new MatchResult
                 {
                     CandidateId = candidateId,
                     Score = score,
-                    Reason = GenerateMatchReason(candidate, request, score)
+                    Reason = GenerateMatchReason(candidate, request, score),
+                    IsNew = true
                 });
             }
         }
@@ -102,6 +148,41 @@ public class MatchingService : IMatchingService
             .OrderByDescending(r => r.Score)
             .Take(maxResults)
             .ToList();
+    }
+
+    /// <summary>
+    /// Calculate freshness boost for follow-up shortlists.
+    /// Boosts candidates who are newly onboarded, recently active, or have updated profiles.
+    /// </summary>
+    private int CalculateFreshnessBoost(dynamic candidate, DateTime previousShortlistCreatedAt)
+    {
+        int boost = 0;
+
+        // Newly onboarded since last shortlist
+        if ((DateTime)candidate.CreatedAt > previousShortlistCreatedAt)
+        {
+            boost += FRESHNESS_BOOST_NEW_CANDIDATE;
+        }
+
+        // Active since last shortlist
+        if ((DateTime)candidate.LastActiveAt > previousShortlistCreatedAt)
+        {
+            boost += FRESHNESS_BOOST_ACTIVE_SINCE;
+        }
+
+        // Profile updated since last shortlist
+        if ((DateTime)candidate.UpdatedAt > previousShortlistCreatedAt)
+        {
+            boost += FRESHNESS_BOOST_PROFILE_UPDATED;
+        }
+
+        // Received new recommendation since last shortlist
+        if ((bool)candidate.HasNewRecommendation)
+        {
+            boost += FRESHNESS_BOOST_NEW_RECOMMENDATION;
+        }
+
+        return boost;
     }
 
     public int CalculateMatchScore(Candidate candidate, ShortlistRequest request)

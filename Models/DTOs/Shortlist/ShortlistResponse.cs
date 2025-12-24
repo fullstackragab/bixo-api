@@ -25,6 +25,24 @@ public class ShortlistResponse
     public DateTime CreatedAt { get; set; }
     public DateTime? CompletedAt { get; set; }
     public int CandidatesCount { get; set; }
+
+    // Versioning: Link to previous shortlist request
+    public Guid? PreviousRequestId { get; set; }
+
+    // Pricing type: 'new', 'follow_up', 'free_regen'
+    public string PricingType { get; set; } = "new";
+
+    // Discount applied for follow-up shortlists
+    public decimal FollowUpDiscount { get; set; }
+
+    // Count of new candidates (not previously recommended)
+    public int NewCandidatesCount { get; set; }
+
+    // Count of re-included candidates (previously recommended)
+    public int RepeatedCandidatesCount { get; set; }
+
+    // True if this is a follow-up to a previous shortlist
+    public bool IsFollowUp => PreviousRequestId.HasValue;
 }
 
 /// <summary>
@@ -76,6 +94,20 @@ public class ShortlistCandidateResponse
     public string? MatchReason { get; set; }
     public int Rank { get; set; }
     public Availability Availability { get; set; }
+
+    // Versioning: TRUE if candidate is new in this shortlist, FALSE if previously recommended
+    public bool IsNew { get; set; } = true;
+
+    // If not new, the shortlist where this candidate was previously recommended
+    public Guid? PreviouslyRecommendedIn { get; set; }
+
+    // Reason for re-including a previously recommended candidate
+    public string? ReInclusionReason { get; set; }
+
+    /// <summary>
+    /// Display label for UI (e.g., "New" or "Previously recommended")
+    /// </summary>
+    public string StatusLabel => IsNew ? "New" : "Previously recommended";
 }
 
 public class ShortlistDetailResponse : ShortlistResponse
