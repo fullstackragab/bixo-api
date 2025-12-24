@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Dapper;
 using bixo_api.Data;
+using bixo_api.Models.DTOs.Location;
 using bixo_api.Models.DTOs.Shortlist;
 using bixo_api.Models.Entities;
 using bixo_api.Models.Enums;
@@ -46,11 +47,19 @@ public class ShortlistService : IShortlistService
         var shortlistId = Guid.NewGuid();
         var now = DateTime.UtcNow;
 
+        // Get effective values from request (prefer new HiringLocation, fall back to legacy)
+        var isRemote = request.GetEffectiveIsRemote();
+        var locationCountry = request.HiringLocation?.Country;
+        var locationCity = request.HiringLocation?.City;
+        var locationTimezone = request.HiringLocation?.Timezone;
+
         await connection.ExecuteAsync(@"
             INSERT INTO shortlist_requests (id, company_id, role_title, tech_stack_required, seniority_required,
-                                           location_preference, remote_allowed, additional_notes, status, created_at)
+                                           location_preference, is_remote, location_country, location_city,
+                                           location_timezone, additional_notes, status, created_at)
             VALUES (@Id, @CompanyId, @RoleTitle, @TechStackRequired::jsonb, @SeniorityRequired,
-                    @LocationPreference, @RemoteAllowed, @AdditionalNotes, @Status, @CreatedAt)",
+                    @LocationPreference, @IsRemote, @LocationCountry, @LocationCity,
+                    @LocationTimezone, @AdditionalNotes, @Status, @CreatedAt)",
             new
             {
                 Id = shortlistId,
@@ -59,7 +68,10 @@ public class ShortlistService : IShortlistService
                 TechStackRequired = JsonSerializer.Serialize(request.TechStackRequired),
                 SeniorityRequired = request.SeniorityRequired.HasValue ? (int?)request.SeniorityRequired.Value : null,
                 LocationPreference = request.LocationPreference,
-                RemoteAllowed = request.RemoteAllowed,
+                IsRemote = isRemote,
+                LocationCountry = locationCountry,
+                LocationCity = locationCity,
+                LocationTimezone = locationTimezone,
                 AdditionalNotes = request.AdditionalNotes,
                 Status = (int)ShortlistStatus.Pending,
                 CreatedAt = now
@@ -72,7 +84,14 @@ public class ShortlistService : IShortlistService
             TechStackRequired = request.TechStackRequired,
             SeniorityRequired = request.SeniorityRequired,
             LocationPreference = request.LocationPreference,
-            RemoteAllowed = request.RemoteAllowed,
+            HiringLocation = new HiringLocationResponse
+            {
+                IsRemote = isRemote,
+                Country = locationCountry,
+                City = locationCity,
+                Timezone = locationTimezone
+            },
+            RemoteAllowed = isRemote, // Keep legacy field populated
             AdditionalNotes = request.AdditionalNotes,
             Status = ShortlistStatus.Pending,
             PricePaid = null,
@@ -88,8 +107,8 @@ public class ShortlistService : IShortlistService
 
         var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
             SELECT id, company_id, role_title, tech_stack_required, seniority_required,
-                   location_preference, remote_allowed, additional_notes, status, price_paid,
-                   created_at, completed_at
+                   location_preference, is_remote, location_country, location_city, location_timezone,
+                   additional_notes, status, price_paid, created_at, completed_at
             FROM shortlist_requests
             WHERE id = @ShortlistId AND company_id = @CompanyId",
             new { ShortlistId = shortlistId, CompanyId = companyId });
@@ -137,6 +156,12 @@ public class ShortlistService : IShortlistService
             });
         }
 
+        // Build HiringLocation response
+        var isRemote = shortlist.is_remote as bool? ?? true;
+        var locationCountry = shortlist.location_country as string;
+        var locationCity = shortlist.location_city as string;
+        var locationTimezone = shortlist.location_timezone as string;
+
         return new ShortlistDetailResponse
         {
             Id = (Guid)shortlist.id,
@@ -144,7 +169,14 @@ public class ShortlistService : IShortlistService
             TechStackRequired = ParseTechStack(shortlist.tech_stack_required as string),
             SeniorityRequired = shortlist.seniority_required != null ? (SeniorityLevel?)(int)shortlist.seniority_required : null,
             LocationPreference = shortlist.location_preference as string,
-            RemoteAllowed = (bool)shortlist.remote_allowed,
+            HiringLocation = new HiringLocationResponse
+            {
+                IsRemote = isRemote,
+                Country = locationCountry,
+                City = locationCity,
+                Timezone = locationTimezone
+            },
+            RemoteAllowed = isRemote, // Keep legacy field populated
             AdditionalNotes = shortlist.additional_notes as string,
             Status = status,
             PricePaid = shortlist.price_paid != null ? (decimal?)shortlist.price_paid : null,
@@ -161,32 +193,45 @@ public class ShortlistService : IShortlistService
 
         var shortlists = await connection.QueryAsync<dynamic>(@"
             SELECT sr.id, sr.role_title, sr.tech_stack_required, sr.seniority_required,
-                   sr.location_preference, sr.remote_allowed, sr.additional_notes, sr.status,
+                   sr.location_preference, sr.is_remote, sr.location_country, sr.location_city,
+                   sr.location_timezone, sr.additional_notes, sr.status,
                    sr.price_paid, sr.created_at, sr.completed_at,
                    COUNT(sc.id) as candidates_count
             FROM shortlist_requests sr
             LEFT JOIN shortlist_candidates sc ON sc.shortlist_request_id = sr.id
             WHERE sr.company_id = @CompanyId
             GROUP BY sr.id, sr.role_title, sr.tech_stack_required, sr.seniority_required,
-                     sr.location_preference, sr.remote_allowed, sr.additional_notes, sr.status,
+                     sr.location_preference, sr.is_remote, sr.location_country, sr.location_city,
+                     sr.location_timezone, sr.additional_notes, sr.status,
                      sr.price_paid, sr.created_at, sr.completed_at
             ORDER BY sr.created_at DESC",
             new { CompanyId = companyId });
 
-        return shortlists.Select(s => new ShortlistResponse
+        return shortlists.Select(s =>
         {
-            Id = (Guid)s.id,
-            RoleTitle = (string)s.role_title,
-            TechStackRequired = ParseTechStack(s.tech_stack_required as string),
-            SeniorityRequired = s.seniority_required != null ? (SeniorityLevel?)(int)s.seniority_required : null,
-            LocationPreference = s.location_preference as string,
-            RemoteAllowed = (bool)s.remote_allowed,
-            AdditionalNotes = s.additional_notes as string,
-            Status = (ShortlistStatus)s.status,
-            PricePaid = s.price_paid != null ? (decimal?)s.price_paid : null,
-            CreatedAt = (DateTime)s.created_at,
-            CompletedAt = s.completed_at != null ? (DateTime?)s.completed_at : null,
-            CandidatesCount = (int)s.candidates_count
+            var isRemote = s.is_remote as bool? ?? true;
+            return new ShortlistResponse
+            {
+                Id = (Guid)s.id,
+                RoleTitle = (string)s.role_title,
+                TechStackRequired = ParseTechStack(s.tech_stack_required as string),
+                SeniorityRequired = s.seniority_required != null ? (SeniorityLevel?)(int)s.seniority_required : null,
+                LocationPreference = s.location_preference as string,
+                HiringLocation = new HiringLocationResponse
+                {
+                    IsRemote = isRemote,
+                    Country = s.location_country as string,
+                    City = s.location_city as string,
+                    Timezone = s.location_timezone as string
+                },
+                RemoteAllowed = isRemote, // Keep legacy field populated
+                AdditionalNotes = s.additional_notes as string,
+                Status = (ShortlistStatus)s.status,
+                PricePaid = s.price_paid != null ? (decimal?)s.price_paid : null,
+                CreatedAt = (DateTime)s.created_at,
+                CompletedAt = s.completed_at != null ? (DateTime?)s.completed_at : null,
+                CandidatesCount = (int)s.candidates_count
+            };
         }).ToList();
     }
 
@@ -196,7 +241,8 @@ public class ShortlistService : IShortlistService
 
         var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
             SELECT id, company_id, role_title, tech_stack_required, seniority_required,
-                   location_preference, remote_allowed, additional_notes, status
+                   location_preference, is_remote, location_country, location_city, location_timezone,
+                   additional_notes, status
             FROM shortlist_requests
             WHERE id = @ShortlistId",
             new { ShortlistId = shortlistId });
@@ -216,7 +262,10 @@ public class ShortlistService : IShortlistService
             TechStackRequired = shortlist.tech_stack_required as string,
             SeniorityRequired = shortlist.seniority_required != null ? (SeniorityLevel?)(int)shortlist.seniority_required : null,
             LocationPreference = shortlist.location_preference as string,
-            RemoteAllowed = (bool)shortlist.remote_allowed,
+            IsRemote = shortlist.is_remote as bool? ?? true,
+            LocationCountry = shortlist.location_country as string,
+            LocationCity = shortlist.location_city as string,
+            LocationTimezone = shortlist.location_timezone as string,
             AdditionalNotes = shortlist.additional_notes as string,
             Status = ShortlistStatus.Processing
         };

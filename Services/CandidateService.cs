@@ -2,6 +2,7 @@ using System.Text.Json;
 using Dapper;
 using bixo_api.Data;
 using bixo_api.Models.DTOs.Candidate;
+using bixo_api.Models.DTOs.Location;
 using bixo_api.Models.Enums;
 using bixo_api.Services.Interfaces;
 
@@ -34,9 +35,14 @@ public class CandidateService : ICandidateService
             SELECT c.id, c.first_name, c.last_name, c.linkedin_url, c.cv_file_key, c.cv_original_file_name,
                    c.desired_role, c.location_preference, c.remote_preference, c.availability,
                    c.open_to_opportunities, c.profile_visible, c.seniority_estimate, c.created_at,
-                   u.email, u.last_active_at
+                   u.email, u.last_active_at,
+                   cl.country AS location_country,
+                   cl.city AS location_city,
+                   cl.timezone AS location_timezone,
+                   cl.willing_to_relocate
             FROM candidates c
             JOIN users u ON u.id = c.user_id
+            LEFT JOIN candidate_locations cl ON cl.candidate_id = c.id
             WHERE c.user_id = @UserId",
             new { UserId = userId });
 
@@ -62,6 +68,24 @@ public class CandidateService : ICandidateService
             cvDownloadUrl = await _s3Service.GeneratePresignedDownloadUrlAsync((string)candidate.cv_file_key);
         }
 
+        // Build location response if location data exists
+        CandidateLocationResponse? locationResponse = null;
+        var locationCountry = candidate.location_country as string;
+        var locationCity = candidate.location_city as string;
+        var locationTimezone = candidate.location_timezone as string;
+        var willingToRelocate = candidate.willing_to_relocate as bool? ?? false;
+
+        if (!string.IsNullOrEmpty(locationCountry) || !string.IsNullOrEmpty(locationCity) || !string.IsNullOrEmpty(locationTimezone))
+        {
+            locationResponse = new CandidateLocationResponse
+            {
+                Country = locationCountry,
+                City = locationCity,
+                Timezone = locationTimezone,
+                WillingToRelocate = willingToRelocate
+            };
+        }
+
         return new CandidateProfileResponse
         {
             Id = (Guid)candidate.id,
@@ -73,6 +97,7 @@ public class CandidateService : ICandidateService
             CvDownloadUrl = cvDownloadUrl,
             DesiredRole = candidate.desired_role as string,
             LocationPreference = candidate.location_preference as string,
+            Location = locationResponse,
             RemotePreference = candidate.remote_preference != null ? (RemotePreference?)(int)candidate.remote_preference : null,
             Availability = (Availability)(int)candidate.availability,
             OpenToOpportunities = (bool)candidate.open_to_opportunities,
@@ -128,6 +153,17 @@ public class CandidateService : ICandidateService
     {
         using var connection = _db.CreateConnection();
 
+        // Get candidate ID for location update
+        var candidateId = await connection.ExecuteScalarAsync<Guid>(
+            "SELECT id FROM candidates WHERE user_id = @UserId",
+            new { UserId = userId });
+
+        if (candidateId == Guid.Empty)
+        {
+            throw new InvalidOperationException("Candidate not found");
+        }
+
+        // Update candidate basic info
         await connection.ExecuteAsync(@"
             UPDATE candidates SET
                 first_name = COALESCE(@FirstName, first_name),
@@ -156,7 +192,59 @@ public class CandidateService : ICandidateService
                 Now = DateTime.UtcNow
             });
 
+        // Update structured location data if provided
+        if (request.Location != null)
+        {
+            await UpdateCandidateLocationAsync(connection, candidateId, request.Location);
+        }
+
         return (await GetProfileAsync(userId))!;
+    }
+
+    private async Task UpdateCandidateLocationAsync(System.Data.IDbConnection connection, Guid candidateId, UpdateCandidateLocationRequest locationRequest)
+    {
+        // Check if location record exists
+        var exists = await connection.ExecuteScalarAsync<bool>(
+            "SELECT EXISTS(SELECT 1 FROM candidate_locations WHERE candidate_id = @CandidateId)",
+            new { CandidateId = candidateId });
+
+        if (exists)
+        {
+            // Update existing location
+            await connection.ExecuteAsync(@"
+                UPDATE candidate_locations SET
+                    country = COALESCE(@Country, country),
+                    city = COALESCE(@City, city),
+                    timezone = COALESCE(@Timezone, timezone),
+                    willing_to_relocate = COALESCE(@WillingToRelocate, willing_to_relocate),
+                    updated_at = @Now
+                WHERE candidate_id = @CandidateId",
+                new
+                {
+                    CandidateId = candidateId,
+                    locationRequest.Country,
+                    locationRequest.City,
+                    locationRequest.Timezone,
+                    locationRequest.WillingToRelocate,
+                    Now = DateTime.UtcNow
+                });
+        }
+        else
+        {
+            // Insert new location record
+            await connection.ExecuteAsync(@"
+                INSERT INTO candidate_locations (candidate_id, country, city, timezone, willing_to_relocate, created_at, updated_at)
+                VALUES (@CandidateId, @Country, @City, @Timezone, @WillingToRelocate, @Now, @Now)",
+                new
+                {
+                    CandidateId = candidateId,
+                    locationRequest.Country,
+                    locationRequest.City,
+                    locationRequest.Timezone,
+                    WillingToRelocate = locationRequest.WillingToRelocate ?? false,
+                    Now = DateTime.UtcNow
+                });
+        }
     }
 
     public async Task<CvUploadResponse> GetCvUploadUrlAsync(Guid userId, string fileName)

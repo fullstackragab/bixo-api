@@ -25,4 +25,5 @@ public class Company
     public ICollection<ShortlistRequest> ShortlistRequests { get; set; } = new List<ShortlistRequest>();
     public ICollection<CandidateProfileView> ProfileViews { get; set; } = new List<CandidateProfileView>();
     public ICollection<Payment> Payments { get; set; } = new List<Payment>();
+    public CompanyLocation? Location { get; set; }
 }

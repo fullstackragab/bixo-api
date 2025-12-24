@@ -29,4 +29,5 @@ public class Candidate
     public ICollection<CandidateProfileView> ProfileViews { get; set; } = new List<CandidateProfileView>();
     public ICollection<SavedCandidate> SavedByCompanies { get; set; } = new List<SavedCandidate>();
     public ICollection<ShortlistCandidate> ShortlistEntries { get; set; } = new List<ShortlistCandidate>();
+    public CandidateLocation? Location { get; set; }
 }

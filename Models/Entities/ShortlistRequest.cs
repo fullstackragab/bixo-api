@@ -9,8 +9,18 @@ public class ShortlistRequest
     public string RoleTitle { get; set; } = string.Empty;
     public string? TechStackRequired { get; set; }
     public SeniorityLevel? SeniorityRequired { get; set; }
+
+    // Legacy location field (kept for backwards compatibility)
     public string? LocationPreference { get; set; }
-    public bool RemoteAllowed { get; set; } = true;
+
+    // New structured location fields for hiring location per request
+    public string? LocationCountry { get; set; }
+    public string? LocationCity { get; set; }
+    public string? LocationTimezone { get; set; }
+
+    // Renamed from RemoteAllowed for clarity
+    public bool IsRemote { get; set; } = true;
+
     public string? AdditionalNotes { get; set; }
     public ShortlistStatus Status { get; set; } = ShortlistStatus.Pending;
     public decimal? PricePaid { get; set; }

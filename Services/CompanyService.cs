@@ -2,6 +2,7 @@ using Dapper;
 using bixo_api.Data;
 using bixo_api.Models.DTOs.Candidate;
 using bixo_api.Models.DTOs.Company;
+using bixo_api.Models.DTOs.Location;
 using bixo_api.Models.Enums;
 using bixo_api.Services.Interfaces;
 
@@ -28,10 +29,14 @@ public class CompanyService : ICompanyService
         using var connection = _db.CreateConnection();
 
         var company = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
-            SELECT id, user_id, company_name, industry, company_size, website, logo_file_key,
-                   subscription_tier, subscription_expires_at, messages_remaining, created_at, updated_at
-            FROM companies
-            WHERE user_id = @UserId",
+            SELECT c.id, c.user_id, c.company_name, c.industry, c.company_size, c.website, c.logo_file_key,
+                   c.subscription_tier, c.subscription_expires_at, c.messages_remaining, c.created_at, c.updated_at,
+                   cl.country AS location_country,
+                   cl.city AS location_city,
+                   cl.timezone AS location_timezone
+            FROM companies c
+            LEFT JOIN company_locations cl ON cl.company_id = c.id
+            WHERE c.user_id = @UserId",
             new { UserId = userId });
 
         if (company == null) return null;
@@ -42,6 +47,22 @@ public class CompanyService : ICompanyService
             logoUrl = await _s3Service.GeneratePresignedDownloadUrlAsync((string)company.logo_file_key);
         }
 
+        // Build location response if location data exists
+        LocationResponse? locationResponse = null;
+        var locationCountry = company.location_country as string;
+        var locationCity = company.location_city as string;
+        var locationTimezone = company.location_timezone as string;
+
+        if (!string.IsNullOrEmpty(locationCountry) || !string.IsNullOrEmpty(locationCity) || !string.IsNullOrEmpty(locationTimezone))
+        {
+            locationResponse = new LocationResponse
+            {
+                Country = locationCountry,
+                City = locationCity,
+                Timezone = locationTimezone
+            };
+        }
+
         return new CompanyProfileResponse
         {
             Id = (Guid)company.id,
@@ -50,6 +71,7 @@ public class CompanyService : ICompanyService
             CompanySize = (string?)company.company_size,
             Website = (string?)company.website,
             LogoUrl = logoUrl,
+            Location = locationResponse,
             SubscriptionTier = (SubscriptionTier)(int)company.subscription_tier,
             SubscriptionExpiresAt = company.subscription_expires_at as DateTime?,
             MessagesRemaining = (int)company.messages_remaining,
@@ -70,6 +92,7 @@ public class CompanyService : ICompanyService
             throw new InvalidOperationException("Company not found");
         }
 
+        var companyId = (Guid)company.id;
         var updateFields = new List<string>();
         var parameters = new DynamicParameters();
         parameters.Add("UserId", userId);
@@ -110,7 +133,56 @@ public class CompanyService : ICompanyService
             await connection.ExecuteAsync(sql, parameters);
         }
 
+        // Update structured location data if provided
+        if (request.Location != null)
+        {
+            await UpdateCompanyLocationAsync(connection, companyId, request.Location);
+        }
+
         return (await GetProfileAsync(userId))!;
+    }
+
+    private async Task UpdateCompanyLocationAsync(System.Data.IDbConnection connection, Guid companyId, UpdateLocationRequest locationRequest)
+    {
+        // Check if location record exists
+        var exists = await connection.ExecuteScalarAsync<bool>(
+            "SELECT EXISTS(SELECT 1 FROM company_locations WHERE company_id = @CompanyId)",
+            new { CompanyId = companyId });
+
+        if (exists)
+        {
+            // Update existing location
+            await connection.ExecuteAsync(@"
+                UPDATE company_locations SET
+                    country = COALESCE(@Country, country),
+                    city = COALESCE(@City, city),
+                    timezone = COALESCE(@Timezone, timezone),
+                    updated_at = @Now
+                WHERE company_id = @CompanyId",
+                new
+                {
+                    CompanyId = companyId,
+                    locationRequest.Country,
+                    locationRequest.City,
+                    locationRequest.Timezone,
+                    Now = DateTime.UtcNow
+                });
+        }
+        else
+        {
+            // Insert new location record
+            await connection.ExecuteAsync(@"
+                INSERT INTO company_locations (company_id, country, city, timezone, created_at, updated_at)
+                VALUES (@CompanyId, @Country, @City, @Timezone, @Now, @Now)",
+                new
+                {
+                    CompanyId = companyId,
+                    locationRequest.Country,
+                    locationRequest.City,
+                    locationRequest.Timezone,
+                    Now = DateTime.UtcNow
+                });
+        }
     }
 
     public async Task<TalentListResponse> SearchTalentAsync(Guid companyId, TalentSearchRequest request)
@@ -139,18 +211,19 @@ public class CompanyService : ICompanyService
             parameters.Add("Availability", (int)request.Availability.Value);
         }
 
-        if (request.RemotePreference.HasValue)
+        // Remote preference is now a ranking signal, not a hard filter
+        // Only apply as filter if explicitly requested
+        if (request.RemotePreference.HasValue && request.RemotePreference.Value == RemotePreference.Remote)
         {
+            // Only hard filter for remote-only candidates when specifically requested
             whereClauses.Add("(c.remote_preference = @RemotePreference OR c.remote_preference = @Flexible)");
             parameters.Add("RemotePreference", (int)request.RemotePreference.Value);
             parameters.Add("Flexible", (int)RemotePreference.Flexible);
         }
 
-        if (!string.IsNullOrEmpty(request.Location))
-        {
-            whereClauses.Add("c.location_preference IS NOT NULL AND LOWER(c.location_preference) LIKE @Location");
-            parameters.Add("Location", $"%{request.Location.ToLower()}%");
-        }
+        // Location is now a ranking signal, not a hard filter
+        // Legacy location filter is kept for backwards compatibility but uses soft matching
+        // Note: We don't add location as a WHERE clause anymore
 
         if (request.LastActiveDays.HasValue)
         {
@@ -187,11 +260,16 @@ public class CompanyService : ICompanyService
 
         var whereClause = string.Join(" AND ", whereClauses);
 
+        // Build location ranking score for ORDER BY
+        // Location ranking: prefer remote match, same country, same timezone, willing to relocate
+        var locationRankingScore = BuildLocationRankingScore(request);
+
         // Get total count
         var countSql = $@"
             SELECT COUNT(DISTINCT c.id)
             FROM candidates c
             JOIN users u ON u.id = c.user_id
+            LEFT JOIN candidate_locations cl ON cl.candidate_id = c.id
             WHERE {whereClause}";
 
         var totalCount = await connection.ExecuteScalarAsync<int>(countSql, parameters);
@@ -203,7 +281,8 @@ public class CompanyService : ICompanyService
             WHERE company_id = @CompanyId",
             new { CompanyId = companyId })).ToList();
 
-        // Get candidates with their top skills and recommendations count
+        // Get candidates with location data for ranking
+        // Use location ranking score in ORDER BY for better matches
         var candidatesSql = $@"
             SELECT DISTINCT
                 c.id,
@@ -214,13 +293,22 @@ public class CompanyService : ICompanyService
                 c.remote_preference,
                 c.availability,
                 c.seniority_estimate,
-                u.last_active_at
+                u.last_active_at,
+                cl.country AS location_country,
+                cl.city AS location_city,
+                cl.timezone AS location_timezone,
+                cl.willing_to_relocate,
+                {locationRankingScore} AS location_score
             FROM candidates c
             JOIN users u ON u.id = c.user_id
+            LEFT JOIN candidate_locations cl ON cl.candidate_id = c.id
             WHERE {whereClause}
-            ORDER BY u.last_active_at DESC
+            ORDER BY {locationRankingScore} DESC, u.last_active_at DESC
             OFFSET @Offset ROWS
             FETCH NEXT @PageSize ROWS ONLY";
+
+        // Add location ranking parameters if needed
+        AddLocationRankingParameters(parameters, request);
 
         var candidates = (await connection.QueryAsync<dynamic>(candidatesSql, parameters)).ToList();
 
@@ -525,5 +613,70 @@ public class CompanyService : ICompanyService
         }
 
         return responses;
+    }
+
+    /// <summary>
+    /// Build SQL expression for location ranking score.
+    /// Uses CASE statements to add points for location matches.
+    /// </summary>
+    private string BuildLocationRankingScore(TalentSearchRequest request)
+    {
+        var scoreParts = new List<string>();
+
+        // Base score of 0
+        scoreParts.Add("0");
+
+        // Remote preference boost (+25)
+        if (request.LocationRanking?.PreferRemote == true || request.RemotePreference == RemotePreference.Remote)
+        {
+            scoreParts.Add("CASE WHEN c.remote_preference IN (0, 3) THEN 25 ELSE 0 END"); // 0=Remote, 3=Flexible
+        }
+
+        // Same country boost (+15)
+        if (!string.IsNullOrEmpty(request.LocationRanking?.PreferCountry) || !string.IsNullOrEmpty(request.Location))
+        {
+            scoreParts.Add("CASE WHEN LOWER(cl.country) = LOWER(@PreferCountry) THEN 15 ELSE 0 END");
+        }
+
+        // Same timezone boost (+10)
+        if (!string.IsNullOrEmpty(request.LocationRanking?.PreferTimezone))
+        {
+            scoreParts.Add("CASE WHEN cl.timezone = @PreferTimezone THEN 10 ELSE 0 END");
+        }
+
+        // Willing to relocate boost (+10)
+        if (request.LocationRanking?.PreferRelocationFriendly == true)
+        {
+            scoreParts.Add("CASE WHEN cl.willing_to_relocate = TRUE THEN 10 ELSE 0 END");
+        }
+
+        return string.Join(" + ", scoreParts);
+    }
+
+    /// <summary>
+    /// Add location ranking parameters to the query.
+    /// </summary>
+    private void AddLocationRankingParameters(DynamicParameters parameters, TalentSearchRequest request)
+    {
+        // Add country preference
+        var preferCountry = request.LocationRanking?.PreferCountry ?? request.Location;
+        if (!string.IsNullOrEmpty(preferCountry))
+        {
+            parameters.Add("PreferCountry", preferCountry);
+        }
+        else
+        {
+            parameters.Add("PreferCountry", DBNull.Value);
+        }
+
+        // Add timezone preference
+        if (!string.IsNullOrEmpty(request.LocationRanking?.PreferTimezone))
+        {
+            parameters.Add("PreferTimezone", request.LocationRanking.PreferTimezone);
+        }
+        else
+        {
+            parameters.Add("PreferTimezone", DBNull.Value);
+        }
     }
 }
