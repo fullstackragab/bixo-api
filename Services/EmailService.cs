@@ -241,11 +241,12 @@ public class EmailService : IEmailService
                     <li>Partial matches = discounted automatically</li>
                 </ul>
 
-                <h2 style=""color: #1f2937; margin-top: 32px; font-size: 18px;"">Why this works</h2>
+                <h2 style=""color: #1f2937; margin-top: 32px; font-size: 18px;"">What to expect</h2>
                 <ul style=""padding-left: 20px;"">
-                    <li>Candidates know access is paid and intentional</li>
-                    <li>Shortlists are reviewed, not automated dumps</li>
-                    <li>Messaging stays focused and spam-free</li>
+                    <li>Candidates on Bixo are passive — most are currently employed</li>
+                    <li>Some may decline to engage, and that's normal</li>
+                    <li>The value is relevance and access, not guaranteed acceptance</li>
+                    <li>Shortlists are snapshots in time, not ongoing pipelines</li>
                 </ul>
 
                 <p style=""margin-top: 32px;"">When you're ready, request your first shortlist — we'll handle the rest.</p>
@@ -308,7 +309,9 @@ public class EmailService : IEmailService
                 <p style=""margin-top: 24px;"">This shortlist is a snapshot in time.<br />
                 If you request a follow-up later, previously delivered candidates will be excluded by default.</p>
 
-                <p style=""margin-top: 24px;"">Payment will only be captured once the shortlist is confirmed as delivered.</p>
+                <p style=""margin-top: 24px;""><strong>A note on responses:</strong><br />
+                These candidates are passive. Some may decline or not respond — that's expected.<br />
+                The value is access to relevant people, not guaranteed engagement.</p>
 
                 <p style=""margin-top: 24px;"">If you need adjustments or a follow-up request, just let us know.</p>
 
@@ -384,7 +387,8 @@ public class EmailService : IEmailService
 
                 <p>You'll stay passive unless a company explicitly includes you in a shortlist.</p>
 
-                <p>If you're shortlisted, you'll be notified before any message is sent.</p>
+                <p>If you're shortlisted, you'll be notified before any message is sent.<br />
+                You can decline at any time — no explanation required, no impact on future visibility.</p>
 
                 <p style=""margin-top: 32px;"">Welcome — and thanks for trusting us with your profile.</p>
 
@@ -444,6 +448,9 @@ public class EmailService : IEmailService
                     <li>You'll be notified if you're shortlisted</li>
                     <li>Companies can only message you <em>after</em> that point</li>
                 </ul>
+
+                <p style=""margin-top: 24px;"">Being shortlisted creates no obligation.<br />
+                If a role isn't relevant or the timing isn't right, you can decline — no explanation needed.</p>
 
                 <p style=""margin-top: 24px;"">You remain in control of your visibility at all times.</p>
 

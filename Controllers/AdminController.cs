@@ -32,8 +32,8 @@ public class AdminController : ControllerBase
             TotalCandidates = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM candidates"),
             ActiveCandidates = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM candidates WHERE open_to_opportunities = TRUE"),
             TotalCompanies = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM companies"),
-            PendingShortlists = await connection.ExecuteScalarAsync<int>($"SELECT COUNT(*) FROM shortlist_requests WHERE status IN ({(int)ShortlistStatus.Pending}, {(int)ShortlistStatus.Processing})"),
-            CompletedShortlists = await connection.ExecuteScalarAsync<int>($"SELECT COUNT(*) FROM shortlist_requests WHERE status = {(int)ShortlistStatus.Completed}"),
+            PendingShortlists = await connection.ExecuteScalarAsync<int>($"SELECT COUNT(*) FROM shortlist_requests WHERE status IN ({(int)ShortlistStatus.PendingScope}, {(int)ShortlistStatus.ScopeProposed}, {(int)ShortlistStatus.ScopeApproved}, {(int)ShortlistStatus.Processing})"),
+            CompletedShortlists = await connection.ExecuteScalarAsync<int>($"SELECT COUNT(*) FROM shortlist_requests WHERE status = {(int)ShortlistStatus.Delivered}"),
             TotalRevenue = await connection.ExecuteScalarAsync<decimal?>($"SELECT COALESCE(SUM(amount_captured), 0) FROM payments WHERE status IN ('{PaymentStatus.Captured.ToString().ToLower()}', '{PaymentStatus.Partial.ToString().ToLower()}')") ?? 0,
             RecentSignups = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM users WHERE created_at >= @Cutoff", new { Cutoff = DateTime.UtcNow.AddDays(-7) })
         };
@@ -180,7 +180,7 @@ public class AdminController : ControllerBase
             Industry = c.industry as string,
             CompanySize = c.company_size as string,
             Website = c.website as string,
-            SubscriptionTier = (int)c.subscription_tier,
+            SubscriptionTier = (SubscriptionTier)(int)c.subscription_tier,
             SubscriptionExpiresAt = c.subscription_expires_at as DateTime?,
             MessagesRemaining = (int)c.messages_remaining,
             ShortlistsCount = (int)(c.shortlists_count ?? 0),
@@ -369,7 +369,7 @@ public class AdminController : ControllerBase
                     Email = (string)c.email,
                     DesiredRole = c.desired_role as string,
                     SeniorityEstimate = c.seniority_estimate != null ? (SeniorityLevel?)(int)c.seniority_estimate : null,
-                    Availability = c.availability as int? ?? 0,
+                    Availability = (Availability)(c.availability as int? ?? 0),
                     Rank = c.rank as int? ?? 0,
                     MatchScore = c.match_score as int? ?? 0,
                     MatchReason = c.match_reason as string,
@@ -447,7 +447,7 @@ public class AdminController : ControllerBase
     {
         using var connection = _db.CreateConnection();
 
-        var completedAt = request.Status == ShortlistStatus.Completed ? DateTime.UtcNow : (DateTime?)null;
+        var completedAt = request.Status == ShortlistStatus.Delivered ? DateTime.UtcNow : (DateTime?)null;
 
         var rowsAffected = await connection.ExecuteAsync(@"
             UPDATE shortlist_requests
@@ -478,6 +478,40 @@ public class AdminController : ControllerBase
         }
 
         return Ok(ApiResponse.Ok("Rankings updated"));
+    }
+
+    /// <summary>
+    /// Propose scope and price for a shortlist request.
+    /// Company must explicitly approve before payment authorization.
+    /// </summary>
+    [HttpPost("shortlists/{id}/scope/propose")]
+    public async Task<ActionResult<ApiResponse>> ProposeScope(Guid id, [FromBody] ProposeScopeRequest request)
+    {
+        if (request.ProposedCandidates <= 0)
+        {
+            return BadRequest(ApiResponse.Fail("Proposed candidates must be greater than 0"));
+        }
+
+        if (request.ProposedPrice <= 0)
+        {
+            return BadRequest(ApiResponse.Fail("Proposed price must be greater than 0"));
+        }
+
+        var proposalRequest = new ScopeProposalRequest
+        {
+            ProposedCandidates = request.ProposedCandidates,
+            ProposedPrice = request.ProposedPrice,
+            Notes = request.Notes
+        };
+
+        var result = await _shortlistService.ProposeScopeAsync(id, proposalRequest);
+
+        if (!result.Success)
+        {
+            return BadRequest(ApiResponse.Fail(result.ErrorMessage ?? "Failed to propose scope"));
+        }
+
+        return Ok(ApiResponse.Ok("Scope proposed. Awaiting company approval."));
     }
 
     [HttpPost("shortlists/{id}/deliver")]
@@ -695,7 +729,7 @@ public class AdminCompanyResponse
     public string? Industry { get; set; }
     public string? CompanySize { get; set; }
     public string? Website { get; set; }
-    public int SubscriptionTier { get; set; }
+    public SubscriptionTier SubscriptionTier { get; set; }
     public DateTime? SubscriptionExpiresAt { get; set; }
     public int MessagesRemaining { get; set; }
     public int ShortlistsCount { get; set; }
@@ -816,7 +850,7 @@ public class AdminShortlistCandidateResponse
     public string Email { get; set; } = string.Empty;
     public string? DesiredRole { get; set; }
     public SeniorityLevel? SeniorityEstimate { get; set; }
-    public int Availability { get; set; }
+    public Availability Availability { get; set; }
     public int Rank { get; set; }
     public int MatchScore { get; set; }
     public string? MatchReason { get; set; }
@@ -885,4 +919,16 @@ public class DeliverShortlistResponse
     public string PaymentAction { get; set; } = string.Empty;
     public decimal AmountCaptured { get; set; }
     public int CandidatesDelivered { get; set; }
+}
+
+public class ProposeScopeRequest
+{
+    /// <summary>Expected number of candidates (e.g. 5-10)</summary>
+    public int ProposedCandidates { get; set; }
+
+    /// <summary>Exact price for this shortlist (no hidden amounts)</summary>
+    public decimal ProposedPrice { get; set; }
+
+    /// <summary>Optional notes about the scope</summary>
+    public string? Notes { get; set; }
 }

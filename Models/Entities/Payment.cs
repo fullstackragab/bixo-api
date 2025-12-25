@@ -11,7 +11,7 @@ public class Payment
     public string Currency { get; set; } = "USD";
     public string? StripePaymentIntentId { get; set; }
     public string? StripeSubscriptionId { get; set; }
-    public PaymentStatus Status { get; set; } = PaymentStatus.Initiated;
+    public PaymentStatus Status { get; set; } = PaymentStatus.PendingApproval;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     // Navigation

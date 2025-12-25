@@ -212,7 +212,7 @@ public class CandidatesController : ControllerBase
         // Get all shortlist messages for this candidate
         var messages = await connection.QueryAsync<dynamic>(@"
             SELECT sm.id, sm.shortlist_id, sm.company_id, sm.message, sm.created_at,
-                   c.company_name
+                   sm.is_system, sm.message_type, c.company_name
             FROM shortlist_messages sm
             JOIN companies c ON c.id = sm.company_id
             WHERE sm.candidate_id = @CandidateId
@@ -226,7 +226,9 @@ public class CandidatesController : ControllerBase
             CompanyId = (Guid)m.company_id,
             CompanyName = (string)m.company_name,
             Message = (string)m.message,
-            CreatedAt = (DateTime)m.created_at
+            CreatedAt = (DateTime)m.created_at,
+            IsSystem = m.is_system ?? false,
+            MessageType = m.message_type ?? "company"
         }).ToList();
 
         return Ok(ApiResponse<List<ShortlistMessageResponse>>.Ok(result));
@@ -257,4 +259,6 @@ public class ShortlistMessageResponse
     public string CompanyName { get; set; } = string.Empty;
     public string Message { get; set; } = string.Empty;
     public DateTime CreatedAt { get; set; }
+    public bool IsSystem { get; set; }
+    public string MessageType { get; set; } = "company";
 }

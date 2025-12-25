@@ -22,7 +22,7 @@ public class ShortlistRequest
     public bool IsRemote { get; set; } = true;
 
     public string? AdditionalNotes { get; set; }
-    public ShortlistStatus Status { get; set; } = ShortlistStatus.Pending;
+    public ShortlistStatus Status { get; set; } = ShortlistStatus.PendingScope;
     public decimal? PricePaid { get; set; }
     public string? PaymentIntentId { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;

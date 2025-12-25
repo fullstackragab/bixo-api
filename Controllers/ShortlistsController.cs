@@ -107,65 +107,65 @@ public class ShortlistsController : ControllerBase
     }
 
     /// <summary>
-    /// Initiate payment authorization for a shortlist (authorize/escrow funds)
+    /// BLOCKED: Direct payment initiation is not allowed.
+    /// Use POST /scope/approve after admin proposes scope and price.
     /// </summary>
     [HttpPost("{id}/payment/initiate")]
-    public async Task<ActionResult<ApiResponse<PaymentInitiationResponse>>> InitiatePayment(Guid id, [FromBody] InitiatePaymentRequest request)
+    [Obsolete("Use scope approval flow instead")]
+    public ActionResult<ApiResponse<PaymentInitiationResponse>> InitiatePayment(Guid id, [FromBody] InitiatePaymentRequest request)
     {
-        var companyId = GetCompanyId();
+        // CRITICAL: Payment authorization ONLY happens after explicit scope approval
+        // See: POST /api/shortlists/{id}/scope/approve
+        return BadRequest(ApiResponse<PaymentInitiationResponse>.Fail(
+            "Direct payment initiation is not allowed. " +
+            "Please wait for scope and price confirmation, then use the approve endpoint."));
+    }
 
-        // Verify shortlist belongs to company
-        using var connection = _db.CreateConnection();
-        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
-            SELECT id, payment_id FROM shortlist_requests
-            WHERE id = @Id AND company_id = @CompanyId",
-            new { Id = id, CompanyId = companyId });
+    /// <summary>
+    /// Get pending scope proposals for the company
+    /// </summary>
+    [HttpGet("scope/pending")]
+    public async Task<ActionResult<ApiResponse<List<ScopeProposalResponse>>>> GetPendingScopeProposals()
+    {
+        var proposals = await _shortlistService.GetPendingScopeProposalsAsync(GetCompanyId());
+        return Ok(ApiResponse<List<ScopeProposalResponse>>.Ok(proposals));
+    }
 
-        if (shortlist == null)
+    /// <summary>
+    /// Approve proposed scope and price, triggering payment authorization.
+    /// This is the ONLY point where payment authorization occurs.
+    /// </summary>
+    [HttpPost("{id}/scope/approve")]
+    public async Task<ActionResult<ApiResponse<ScopeApprovalResponse>>> ApproveScope(Guid id, [FromBody] ApproveScopeRequest request)
+    {
+        if (!request.ConfirmApproval)
         {
-            return NotFound(ApiResponse<PaymentInitiationResponse>.Fail("Shortlist not found"));
+            return BadRequest(ApiResponse<ScopeApprovalResponse>.Fail(
+                "Explicit approval confirmation required. Set confirmApproval to true."));
         }
 
-        // Check if payment already exists
-        if (shortlist.payment_id != null)
+        var approvalRequest = new ScopeApprovalRequest
         {
-            var existingStatus = await _paymentService.GetPaymentStatusAsync(id);
-            if (existingStatus != null && existingStatus.Status != "failed")
-            {
-                return BadRequest(ApiResponse<PaymentInitiationResponse>.Fail("Payment already initiated for this shortlist"));
-            }
-        }
-
-        // Get price estimate
-        var estimate = await _shortlistService.GetPriceEstimateAsync(id);
-
-        var initiationRequest = new PaymentInitiationRequest
-        {
-            CompanyId = companyId,
-            ShortlistRequestId = id,
-            Amount = request.Amount ?? estimate.FinalPrice,
-            Currency = request.Currency ?? "USD",
             Provider = request.Provider ?? "stripe",
-            Description = $"Shortlist payment for request {id}"
+            ConfirmApproval = request.ConfirmApproval
         };
 
-        var result = await _paymentService.InitiatePaymentAsync(initiationRequest);
+        var result = await _shortlistService.ApproveScopeAsync(GetCompanyId(), id, approvalRequest);
 
         if (!result.Success)
         {
-            return BadRequest(ApiResponse<PaymentInitiationResponse>.Fail(result.ErrorMessage ?? "Payment initiation failed"));
+            return BadRequest(ApiResponse<ScopeApprovalResponse>.Fail(result.ErrorMessage ?? "Scope approval failed"));
         }
 
-        var response = new PaymentInitiationResponse
+        var response = new ScopeApprovalResponse
         {
             PaymentId = result.PaymentId!.Value,
             ClientSecret = result.ClientSecret,
             ApprovalUrl = result.ApprovalUrl,
-            EscrowAddress = result.EscrowAddress,
-            Provider = request.Provider ?? "stripe"
+            EscrowAddress = result.EscrowAddress
         };
 
-        return Ok(ApiResponse<PaymentInitiationResponse>.Ok(response, "Payment initiated"));
+        return Ok(ApiResponse<ScopeApprovalResponse>.Ok(response, "Scope approved and payment authorized"));
     }
 
     /// <summary>
@@ -419,4 +419,21 @@ public class PaymentInitiationResponse
 public class ConfirmPaymentRequest
 {
     public string? ProviderReference { get; set; }
+}
+
+public class ApproveScopeRequest
+{
+    /// <summary>Explicit confirmation that company approves scope and authorizes payment</summary>
+    public bool ConfirmApproval { get; set; }
+
+    /// <summary>Payment provider: stripe | paypal | usdc</summary>
+    public string? Provider { get; set; }
+}
+
+public class ScopeApprovalResponse
+{
+    public Guid PaymentId { get; set; }
+    public string? ClientSecret { get; set; }
+    public string? ApprovalUrl { get; set; }
+    public string? EscrowAddress { get; set; }
 }

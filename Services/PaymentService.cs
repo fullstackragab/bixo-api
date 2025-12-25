@@ -84,7 +84,7 @@ public class PaymentService : IPaymentService
                 ProviderReference = "pending",
                 AmountAuthorized = request.Amount,
                 request.Currency,
-                Status = "initiated",
+                Status = "pending_approval",
                 CreatedAt = now,
                 UpdatedAt = now
             });
@@ -95,7 +95,7 @@ public class PaymentService : IPaymentService
             new { PaymentId = paymentId, request.ShortlistRequestId });
 
         // Log audit entry
-        await LogPaymentAuditAsync(connection, paymentId, null, "initiated", "payment_initiated", null);
+        await LogPaymentAuditAsync(connection, paymentId, null, "pending_approval", "payment_created", null);
 
         // Authorize with provider
         var authRequest = new PaymentAuthorizationRequest
@@ -119,7 +119,7 @@ public class PaymentService : IPaymentService
                 WHERE id = @PaymentId",
                 new { ErrorMessage = authResult.ErrorMessage, UpdatedAt = DateTime.UtcNow, PaymentId = paymentId });
 
-            await LogPaymentAuditAsync(connection, paymentId, "initiated", "failed", "authorization_failed",
+            await LogPaymentAuditAsync(connection, paymentId, "pending_approval", "failed", "authorization_failed",
                 new { authResult.ErrorMessage, authResult.ErrorCode });
 
             return new PaymentInitiationResult
@@ -161,14 +161,13 @@ public class PaymentService : IPaymentService
         }
 
         var currentStatus = (string)payment.status;
-        if (currentStatus != "initiated")
+        if (currentStatus != "pending_approval")
         {
             _logger.LogWarning("Payment {PaymentId} already in status {Status}", paymentId, currentStatus);
-            return currentStatus == "authorized" || currentStatus == "escrowed";
+            return currentStatus == "authorized";
         }
 
-        var provider = (string)payment.provider;
-        var newStatus = provider == "usdc" ? "escrowed" : "authorized";
+        var newStatus = "authorized";
 
         // Update provider reference if provided
         if (!string.IsNullOrEmpty(providerReference))
@@ -211,7 +210,7 @@ public class PaymentService : IPaymentService
         }
 
         var currentStatus = (string)payment.status;
-        if (currentStatus != "authorized" && currentStatus != "escrowed")
+        if (currentStatus != "authorized")
         {
             return new PaymentFinalizationResult
             {

@@ -1,3 +1,4 @@
+using System.Data;
 using System.Text.Json;
 using Dapper;
 using bixo_api.Data;
@@ -128,7 +129,7 @@ public class ShortlistService : IShortlistService
                 LocationCity = locationCity,
                 LocationTimezone = locationTimezone,
                 AdditionalNotes = request.AdditionalNotes,
-                Status = (int)ShortlistStatus.Pending,
+                Status = (int)ShortlistStatus.PendingScope,
                 CreatedAt = now,
                 PreviousRequestId = previousRequestId,
                 PricingType = pricingType,
@@ -174,7 +175,7 @@ public class ShortlistService : IShortlistService
             },
             RemoteAllowed = isRemote, // Keep legacy field populated
             AdditionalNotes = request.AdditionalNotes,
-            Status = ShortlistStatus.Pending,
+            Status = ShortlistStatus.PendingScope,
             PricePaid = null,
             CreatedAt = now,
             CompletedAt = null,
@@ -352,7 +353,7 @@ public class ShortlistService : IShortlistService
 
         var status = (ShortlistStatus)shortlist.status;
         var filteredCandidates = candidates
-            .Where(c => (bool)c.admin_approved || status == ShortlistStatus.Completed);
+            .Where(c => (bool)c.admin_approved || status == ShortlistStatus.Delivered);
 
         var candidatesList = new List<ShortlistCandidateResponse>();
         int newCandidatesCount = 0;
@@ -659,7 +660,7 @@ public class ShortlistService : IShortlistService
 
         // Verify shortlist exists and has payment
         var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
-            SELECT sr.id, sr.status, sr.payment_id, sr.role_title, p.status as payment_status, p.amount_authorized,
+            SELECT sr.id, sr.status, sr.payment_id, sr.role_title, sr.company_id, p.status as payment_status, p.amount_authorized,
                    u.email as company_email
             FROM shortlist_requests sr
             LEFT JOIN payments p ON p.id = sr.payment_id
@@ -708,7 +709,7 @@ public class ShortlistService : IShortlistService
         string paymentAction = "no_payment";
         decimal amountCaptured = 0;
 
-        if (paymentId.HasValue && (paymentStatus == "authorized" || paymentStatus == "escrowed"))
+        if (paymentId.HasValue && paymentStatus == "authorized")
         {
             var outcome = new ShortlistOutcome
             {
@@ -741,15 +742,16 @@ public class ShortlistService : IShortlistService
             WHERE id = @ShortlistRequestId",
             new
             {
-                Status = (int)ShortlistStatus.Completed,
+                Status = (int)ShortlistStatus.Delivered,
                 CompletedAt = DateTime.UtcNow,
                 FinalPrice = amountCaptured > 0 ? amountCaptured : (decimal?)null,
                 ShortlistRequestId = shortlistRequestId
             });
 
-        // Send shortlist delivered email (fire and forget)
+        // Send shortlist delivered email to company (fire and forget)
         var companyEmail = shortlist.company_email as string;
         var roleTitle = shortlist.role_title as string;
+        var companyId = (Guid)shortlist.company_id;
         if (!string.IsNullOrEmpty(companyEmail))
         {
             _ = _emailService.SendShortlistDeliveredEmailAsync(new ShortlistDeliveredNotification
@@ -761,12 +763,206 @@ public class ShortlistService : IShortlistService
             });
         }
 
+        // Send system message to all approved candidates
+        await SendShortlistedSystemMessagesAsync(connection, shortlistRequestId, companyId);
+
         return new ShortlistDeliveryResult
         {
             Success = true,
             PaymentAction = paymentAction,
             AmountCaptured = amountCaptured
         };
+    }
+
+    /// <summary>
+    /// Sends immutable system message to all approved candidates in a shortlist.
+    /// </summary>
+    private async Task SendShortlistedSystemMessagesAsync(IDbConnection connection, Guid shortlistRequestId, Guid companyId)
+    {
+        const string systemMessage = @"You were shortlisted because your background matches this role.
+
+This does not mean you're expected to respond, interview, or accept anything.
+
+If the role isn't relevant or the timing isn't right, you can safely decline — no explanation required.
+
+Declining will not affect your visibility for future opportunities.";
+
+        // Get all approved candidates who haven't received a system shortlisted message yet
+        var approvedCandidates = await connection.QueryAsync<Guid>(@"
+            SELECT sc.candidate_id
+            FROM shortlist_candidates sc
+            WHERE sc.shortlist_request_id = @ShortlistRequestId
+              AND sc.admin_approved = TRUE
+              AND NOT EXISTS (
+                  SELECT 1 FROM shortlist_messages sm
+                  WHERE sm.shortlist_id = @ShortlistRequestId
+                    AND sm.candidate_id = sc.candidate_id
+                    AND sm.is_system = TRUE
+                    AND sm.message_type = 'shortlisted'
+              )",
+            new { ShortlistRequestId = shortlistRequestId });
+
+        var now = DateTime.UtcNow;
+        foreach (var candidateId in approvedCandidates)
+        {
+            await connection.ExecuteAsync(@"
+                INSERT INTO shortlist_messages (id, shortlist_id, company_id, candidate_id, message, is_system, message_type, created_at)
+                VALUES (@Id, @ShortlistId, @CompanyId, @CandidateId, @Message, TRUE, 'shortlisted', @CreatedAt)",
+                new
+                {
+                    Id = Guid.NewGuid(),
+                    ShortlistId = shortlistRequestId,
+                    CompanyId = companyId,
+                    CandidateId = candidateId,
+                    Message = systemMessage,
+                    CreatedAt = now
+                });
+        }
+    }
+
+    // === Scope Confirmation Flow ===
+
+    public async Task<ScopeProposalResult> ProposeScopeAsync(Guid shortlistRequestId, ScopeProposalRequest request)
+    {
+        using var connection = _db.CreateConnection();
+
+        // Verify shortlist exists and is in correct state
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT id, status FROM shortlist_requests WHERE id = @Id",
+            new { Id = shortlistRequestId });
+
+        if (shortlist == null)
+        {
+            return new ScopeProposalResult { Success = false, ErrorMessage = "Shortlist not found" };
+        }
+
+        if ((int)shortlist.status != (int)ShortlistStatus.PendingScope)
+        {
+            return new ScopeProposalResult { Success = false, ErrorMessage = "Shortlist is not pending scope review" };
+        }
+
+        // Update with proposed scope and price
+        await connection.ExecuteAsync(@"
+            UPDATE shortlist_requests
+            SET status = @Status,
+                proposed_candidates = @ProposedCandidates,
+                proposed_price = @ProposedPrice,
+                scope_proposed_at = @Now,
+                scope_approval_notes = @Notes
+            WHERE id = @Id",
+            new
+            {
+                Status = (int)ShortlistStatus.ScopeProposed,
+                ProposedCandidates = request.ProposedCandidates,
+                ProposedPrice = request.ProposedPrice,
+                Now = DateTime.UtcNow,
+                Notes = request.Notes,
+                Id = shortlistRequestId
+            });
+
+        // TODO: Send email to company notifying of scope proposal
+
+        return new ScopeProposalResult { Success = true };
+    }
+
+    public async Task<ScopeApprovalResult> ApproveScopeAsync(Guid companyId, Guid shortlistRequestId, ScopeApprovalRequest request)
+    {
+        // CRITICAL: This is the ONLY point where payment authorization may occur
+        // Company must explicitly confirm approval
+
+        if (!request.ConfirmApproval)
+        {
+            return new ScopeApprovalResult { Success = false, ErrorMessage = "Explicit approval confirmation required" };
+        }
+
+        using var connection = _db.CreateConnection();
+
+        // Verify shortlist exists, belongs to company, and is in correct state
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT id, status, company_id, proposed_candidates, proposed_price
+            FROM shortlist_requests
+            WHERE id = @Id AND company_id = @CompanyId",
+            new { Id = shortlistRequestId, CompanyId = companyId });
+
+        if (shortlist == null)
+        {
+            return new ScopeApprovalResult { Success = false, ErrorMessage = "Shortlist not found" };
+        }
+
+        if ((int)shortlist.status != (int)ShortlistStatus.ScopeProposed)
+        {
+            return new ScopeApprovalResult { Success = false, ErrorMessage = "Shortlist does not have a pending scope proposal" };
+        }
+
+        decimal proposedPrice = shortlist.proposed_price;
+        if (proposedPrice <= 0)
+        {
+            return new ScopeApprovalResult { Success = false, ErrorMessage = "Invalid proposed price" };
+        }
+
+        // Now initiate payment authorization with the EXACT approved price
+        var paymentRequest = new PaymentInitiationRequest
+        {
+            CompanyId = companyId,
+            ShortlistRequestId = shortlistRequestId,
+            Amount = proposedPrice,
+            Currency = "USD",
+            Provider = request.Provider,
+            Description = $"Shortlist authorization for request {shortlistRequestId}"
+        };
+
+        var paymentResult = await _paymentService.InitiatePaymentAsync(paymentRequest);
+
+        if (!paymentResult.Success)
+        {
+            return new ScopeApprovalResult { Success = false, ErrorMessage = paymentResult.ErrorMessage };
+        }
+
+        // Update shortlist status to ScopeApproved
+        await connection.ExecuteAsync(@"
+            UPDATE shortlist_requests
+            SET status = @Status,
+                scope_approved_at = @Now,
+                payment_id = @PaymentId
+            WHERE id = @Id",
+            new
+            {
+                Status = (int)ShortlistStatus.ScopeApproved,
+                Now = DateTime.UtcNow,
+                PaymentId = paymentResult.PaymentId,
+                Id = shortlistRequestId
+            });
+
+        return new ScopeApprovalResult
+        {
+            Success = true,
+            PaymentId = paymentResult.PaymentId,
+            ClientSecret = paymentResult.ClientSecret,
+            ApprovalUrl = paymentResult.ApprovalUrl,
+            EscrowAddress = paymentResult.EscrowAddress
+        };
+    }
+
+    public async Task<List<ScopeProposalResponse>> GetPendingScopeProposalsAsync(Guid companyId)
+    {
+        using var connection = _db.CreateConnection();
+
+        var proposals = await connection.QueryAsync<dynamic>(@"
+            SELECT id, role_title, proposed_candidates, proposed_price, scope_proposed_at, scope_approval_notes
+            FROM shortlist_requests
+            WHERE company_id = @CompanyId AND status = @Status
+            ORDER BY scope_proposed_at DESC",
+            new { CompanyId = companyId, Status = (int)ShortlistStatus.ScopeProposed });
+
+        return proposals.Select(p => new ScopeProposalResponse
+        {
+            ShortlistId = (Guid)p.id,
+            RoleTitle = p.role_title ?? "",
+            ProposedCandidates = (int)(p.proposed_candidates ?? 0),
+            ProposedPrice = (decimal)(p.proposed_price ?? 0),
+            ProposedAt = (DateTime)(p.scope_proposed_at ?? DateTime.MinValue),
+            Notes = p.scope_approval_notes as string
+        }).ToList();
     }
 
     private List<string> ParseTechStack(string? techStackJson)
