@@ -20,25 +20,37 @@ public interface IShortlistService
     /// </summary>
     Task<ShortlistDeliveryResult> DeliverShortlistAsync(Guid shortlistRequestId, ShortlistDeliveryRequest request);
 
-    // === Scope Confirmation Flow ===
+    // === Pricing & Payment Flow ===
 
     /// <summary>
-    /// Admin proposes scope and price for a shortlist request.
-    /// Moves status from PendingScope to ScopeProposed.
+    /// Admin sets price for a shortlist (status: Processing → PricingPending).
     /// </summary>
     Task<ScopeProposalResult> ProposeScopeAsync(Guid shortlistRequestId, ScopeProposalRequest request);
 
     /// <summary>
-    /// Company approves the proposed scope and price.
-    /// Moves status from ScopeProposed to ScopeApproved.
-    /// This is the ONLY point where payment authorization may occur.
+    /// Company approves pricing (status: PricingPending → PricingApproved).
+    /// Does NOT trigger payment authorization.
     /// </summary>
-    Task<ScopeApprovalResult> ApproveScopeAsync(Guid companyId, Guid shortlistRequestId, ScopeApprovalRequest request);
+    Task ApprovePricingAsync(Guid companyId, Guid shortlistRequestId);
 
     /// <summary>
-    /// Get pending scope proposals for a company.
+    /// Company declines pricing (status: PricingPending → Processing).
+    /// Admin can propose a new price.
+    /// </summary>
+    Task DeclinePricingAsync(Guid companyId, Guid shortlistRequestId, string? reason);
+
+    /// <summary>
+    /// Authorize payment after pricing approval (status: PricingApproved → Authorized).
+    /// </summary>
+    Task<PaymentAuthorizationResult> AuthorizePaymentAsync(Guid companyId, Guid shortlistRequestId, string provider);
+
+    /// <summary>
+    /// Get shortlists with pending pricing for a company.
     /// </summary>
     Task<List<ScopeProposalResponse>> GetPendingScopeProposalsAsync(Guid companyId);
+
+    // Legacy method - kept for compatibility during migration
+    Task<ScopeApprovalResult> ApproveScopeAsync(Guid companyId, Guid shortlistRequestId, ScopeApprovalRequest request);
 }
 
 public class ShortlistPriceEstimate

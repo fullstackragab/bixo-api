@@ -1,36 +1,37 @@
 namespace bixo_api.Models.Enums;
 
 /// <summary>
-/// Shortlist lifecycle states following the business flow:
-/// Draft → Matching → ReadyForPricing → PricingRequested → PricingApproved → Delivered → PaymentCaptured
+/// Shortlist lifecycle states following the trust-first, gated monetization flow:
+/// Submitted → Processing → PricingPending → PricingApproved → Authorized → Delivered → Completed
 ///
 /// Rules:
-/// - Payment authorization happens at PricingApproved
-/// - Payment capture ONLY happens after Delivered
-/// - Admins cannot set prices or capture payments directly
+/// - Admin sets price, cannot trigger payment or delivery
+/// - Company approves pricing before authorization
+/// - Payment authorization before delivery
+/// - Payment capture only after delivery
 /// </summary>
 public enum ShortlistStatus
 {
-    /// <summary>Request created, not yet being processed</summary>
-    Draft = 0,
+    /// <summary>Company submitted shortlist request, no price yet</summary>
+    Submitted = 0,
 
-    /// <summary>System is matching candidates to the request</summary>
-    Matching = 1,
+    /// <summary>Admin is processing (ranking/approving candidates)</summary>
+    Processing = 1,
 
-    /// <summary>Candidates matched, ready for admin to set pricing</summary>
-    ReadyForPricing = 2,
+    /// <summary>Admin set price, awaiting company approval</summary>
+    PricingPending = 2,
 
-    /// <summary>Pricing set by system, awaiting company approval</summary>
-    PricingRequested = 3,
+    /// <summary>Company approved pricing</summary>
+    PricingApproved = 3,
 
-    /// <summary>Company approved pricing, payment authorized</summary>
-    PricingApproved = 4,
+    /// <summary>Payment authorized, ready for delivery</summary>
+    Authorized = 4,
 
-    /// <summary>Shortlist delivered to company</summary>
+    /// <summary>Shortlist delivered to company, candidates exposed</summary>
     Delivered = 5,
 
-    /// <summary>Payment captured after delivery</summary>
-    PaymentCaptured = 6,
+    /// <summary>Payment captured, flow complete</summary>
+    Completed = 6,
 
     /// <summary>Cancelled at any stage</summary>
     Cancelled = 7
@@ -43,13 +44,13 @@ public static class ShortlistStatusTransitions
 {
     private static readonly Dictionary<ShortlistStatus, HashSet<ShortlistStatus>> ValidTransitions = new()
     {
-        [ShortlistStatus.Draft] = new() { ShortlistStatus.Matching, ShortlistStatus.Cancelled },
-        [ShortlistStatus.Matching] = new() { ShortlistStatus.ReadyForPricing, ShortlistStatus.Cancelled },
-        [ShortlistStatus.ReadyForPricing] = new() { ShortlistStatus.PricingRequested, ShortlistStatus.Cancelled },
-        [ShortlistStatus.PricingRequested] = new() { ShortlistStatus.PricingApproved, ShortlistStatus.Cancelled },
-        [ShortlistStatus.PricingApproved] = new() { ShortlistStatus.Delivered, ShortlistStatus.Cancelled },
-        [ShortlistStatus.Delivered] = new() { ShortlistStatus.PaymentCaptured },
-        [ShortlistStatus.PaymentCaptured] = new(),
+        [ShortlistStatus.Submitted] = new() { ShortlistStatus.Processing, ShortlistStatus.PricingPending, ShortlistStatus.Cancelled },
+        [ShortlistStatus.Processing] = new() { ShortlistStatus.PricingPending, ShortlistStatus.Cancelled },
+        [ShortlistStatus.PricingPending] = new() { ShortlistStatus.PricingApproved, ShortlistStatus.Processing, ShortlistStatus.Cancelled },
+        [ShortlistStatus.PricingApproved] = new() { ShortlistStatus.Authorized, ShortlistStatus.Cancelled },
+        [ShortlistStatus.Authorized] = new() { ShortlistStatus.Delivered, ShortlistStatus.Cancelled },
+        [ShortlistStatus.Delivered] = new() { ShortlistStatus.Completed },
+        [ShortlistStatus.Completed] = new(),
         [ShortlistStatus.Cancelled] = new()
     };
 

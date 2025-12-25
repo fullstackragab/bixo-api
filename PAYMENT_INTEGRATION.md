@@ -191,26 +191,25 @@ POST /api/shortlists/{id}/payment/confirm
 
 | Value | Name | Description |
 |-------|------|-------------|
-| 0 | `Draft` | Request created, not yet being processed |
-| 1 | `Matching` | System is matching candidates |
-| 2 | `ReadyForPricing` | Candidates matched, ready for pricing |
-| 3 | `PricingRequested` | Pricing sent to company, awaiting approval |
-| 4 | `PricingApproved` | Company approved pricing, payment authorized |
-| 5 | `Delivered` | Shortlist delivered to company |
-| 6 | `PaymentCaptured` | Payment captured after delivery |
+| 0 | `Submitted` | Company submitted request, no price yet |
+| 1 | `Processing` | Admin processing (ranking candidates) |
+| 2 | `PricingPending` | Admin set price, awaiting company approval |
+| 3 | `PricingApproved` | Company approved pricing (no payment yet) |
+| 4 | `Authorized` | Payment authorized, ready for delivery |
+| 5 | `Delivered` | Shortlist delivered, candidates exposed |
+| 6 | `Completed` | Payment captured, flow complete |
 | 7 | `Cancelled` | Cancelled at any stage |
 
 ### PaymentStatus
 
 | Value | Name | Description |
 |-------|------|-------------|
-| 0 | `PendingApproval` | Price proposed, awaiting company approval |
-| 1 | `Authorized` | Company approved, funds authorized |
-| 2 | `Captured` | Full amount captured after delivery |
-| 3 | `Partial` | Partial amount captured |
-| 4 | `Released` | Authorization released (no charge) |
-| 5 | `Canceled` | Payment canceled before authorization |
-| 6 | `Failed` | Payment failed at any stage |
+| 0 | `None` | No payment record or not yet authorized |
+| 1 | `Authorized` | Payment authorized (funds held) |
+| 2 | `Captured` | Payment captured after delivery |
+| 3 | `Failed` | Payment failed |
+| 4 | `Expired` | Authorization expired before capture |
+| 5 | `Released` | Authorization released (no charge) |
 
 ---
 

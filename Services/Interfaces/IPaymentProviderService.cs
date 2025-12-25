@@ -52,6 +52,7 @@ public class PaymentAuthorizationRequest
 public class PaymentAuthorizationResult
 {
     public bool Success { get; set; }
+    public Guid PaymentId { get; set; }
     public string? ProviderReference { get; set; }
     public string? ClientSecret { get; set; } // For frontend confirmation (Stripe)
     public string? ApprovalUrl { get; set; } // For redirect flows (PayPal)

@@ -29,6 +29,17 @@ public interface IPaymentService
     /// </summary>
     Task<PaymentStatusResponse?> GetPaymentStatusAsync(Guid shortlistRequestId);
 
+    /// <summary>
+    /// Check if authorization is still valid (not expired).
+    /// Stripe authorizations expire after ~7 days.
+    /// </summary>
+    Task<bool> IsAuthorizationValidAsync(Guid paymentId);
+
+    /// <summary>
+    /// Handle expired authorization - requires new approval + authorization.
+    /// </summary>
+    Task HandleExpiredAuthorizationAsync(Guid paymentId);
+
     // === Legacy Methods (Subscriptions) ===
 
     Task<string> CreateSubscriptionSessionAsync(Guid companyId, Guid planId, bool yearly);

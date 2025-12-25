@@ -41,17 +41,17 @@ All enums are now serialized as **camelCase strings** instead of integers.
 
 ### ShortlistStatus
 ```json
-"draft" | "matching" | "readyForPricing" | "pricingRequested" | "pricingApproved" | "delivered" | "paymentCaptured" | "cancelled"
+"submitted" | "processing" | "pricingPending" | "pricingApproved" | "authorized" | "delivered" | "completed" | "cancelled"
 ```
 
 **Lifecycle Flow:**
 ```
-Draft → Matching → ReadyForPricing → PricingRequested → PricingApproved → Delivered → PaymentCaptured
+Submitted → Processing → PricingPending → PricingApproved → Authorized → Delivered → Completed
 ```
 
 ### PaymentStatus
 ```json
-"pendingApproval" | "authorized" | "captured" | "partial" | "released" | "canceled" | "failed"
+"none" | "authorized" | "captured" | "failed" | "expired" | "released"
 ```
 
 **Frontend normalizers should handle both numeric and string values during transition.**
@@ -62,24 +62,35 @@ Draft → Matching → ReadyForPricing → PricingRequested → PricingApproved 
 
 ### Status Flow
 ```
-Draft → Matching → ReadyForPricing → PricingRequested → PricingApproved → Delivered → PaymentCaptured
-  ↓         ↓             ↓                ↓                  ↓              ↓              ↓
-Create   System      Candidates      Pricing sent       Company        Shortlist      Payment
-request  matches     matched         to company         approves       delivered      captured
+Submitted → Processing → PricingPending → PricingApproved → Authorized → Delivered → Completed
+    ↓           ↓             ↓                ↓                ↓            ↓           ↓
+ Company     Admin       Admin sets      Company         Payment      Shortlist    Payment
+ submits     processes   price           approves        authorized   delivered    captured
 ```
 
 ### Key Rules
-- Payment authorization happens at `PricingApproved` (not before)
-- Payment capture ONLY happens after `Delivered`
-- Admins cannot set prices or capture payments directly
-- All state transitions are validated and logged
+1. **Company submits** → `submitted` (no price, no payment)
+2. **Admin processes** → `processing` (ranking candidates)
+3. **Admin sets price** → `pricingPending` (admin cannot trigger payment)
+4. **Company approves pricing** → `pricingApproved` (no payment yet)
+5. **Company authorizes payment** → `authorized` (funds held)
+6. **Admin delivers** → `delivered` (candidates exposed)
+7. **Payment captured** → `completed` (auto after delivery)
+
+### Important
+- Payment authorization is a SEPARATE step from pricing approval
+- Candidates are never exposed to billing logic
+- Admins cannot set/edit prices or capture payments directly
+- All state transitions are validated and audited
 
 ### Company Endpoints
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/shortlists/scope/pending` | Get pending scope proposals |
-| `POST` | `/api/shortlists/{id}/scope/approve` | Approve scope and authorize payment |
+| `GET` | `/api/shortlists/pricing/pending` | Get shortlists awaiting pricing approval |
+| `POST` | `/api/shortlists/{id}/approve-pricing` | Approve pricing (no payment yet) |
+| `POST` | `/api/shortlists/{id}/authorize-payment` | Authorize payment (hold funds) |
+| `GET` | `/api/shortlists/{id}/delivered` | Get delivered shortlist with candidates |
 | `GET` | `/api/shortlists/{id}/payment/status` | Get payment status |
 | `POST` | `/api/shortlists/{id}/payment/confirm` | Confirm authorization (after provider redirect) |
 

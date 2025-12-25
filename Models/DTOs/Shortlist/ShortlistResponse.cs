@@ -43,6 +43,20 @@ public class ShortlistResponse
 
     // True if this is a follow-up to a previous shortlist
     public bool IsFollowUp => PreviousRequestId.HasValue;
+
+    // === Pricing proposal fields (visible when status is PricingPending) ===
+
+    /// <summary>Admin-proposed price awaiting company approval</summary>
+    public decimal? ProposedPrice { get; set; }
+
+    /// <summary>Expected number of candidates</summary>
+    public int? ProposedCandidates { get; set; }
+
+    /// <summary>When the price was proposed</summary>
+    public DateTime? ScopeProposedAt { get; set; }
+
+    /// <summary>Notes from admin about the scope</summary>
+    public string? ScopeNotes { get; set; }
 }
 
 /// <summary>

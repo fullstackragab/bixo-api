@@ -16,6 +16,7 @@ public class ShortlistService : IShortlistService
     private readonly IMatchingService _matchingService;
     private readonly IEmailService _emailService;
     private readonly IPaymentService _paymentService;
+    private readonly ILogger<ShortlistService> _logger;
 
     // Similarity threshold for detecting follow-up shortlists (0-100)
     private const int FOLLOW_UP_SIMILARITY_THRESHOLD = 70;
@@ -30,12 +31,14 @@ public class ShortlistService : IShortlistService
         IDbConnectionFactory db,
         IMatchingService matchingService,
         IEmailService emailService,
-        IPaymentService paymentService)
+        IPaymentService paymentService,
+        ILogger<ShortlistService> logger)
     {
         _db = db;
         _matchingService = matchingService;
         _emailService = emailService;
         _paymentService = paymentService;
+        _logger = logger;
     }
 
     public async Task<List<ShortlistPricingResponse>> GetPricingAsync()
@@ -129,7 +132,7 @@ public class ShortlistService : IShortlistService
                 LocationCity = locationCity,
                 LocationTimezone = locationTimezone,
                 AdditionalNotes = request.AdditionalNotes,
-                Status = (int)ShortlistStatus.Draft,
+                Status = (int)ShortlistStatus.Submitted,
                 CreatedAt = now,
                 PreviousRequestId = previousRequestId,
                 PricingType = pricingType,
@@ -175,7 +178,7 @@ public class ShortlistService : IShortlistService
             },
             RemoteAllowed = isRemote, // Keep legacy field populated
             AdditionalNotes = request.AdditionalNotes,
-            Status = ShortlistStatus.Draft,
+            Status = ShortlistStatus.Submitted,
             PricePaid = null,
             CreatedAt = now,
             CompletedAt = null,
@@ -334,7 +337,8 @@ public class ShortlistService : IShortlistService
             SELECT id, company_id, role_title, tech_stack_required, seniority_required,
                    location_preference, is_remote, location_country, location_city, location_timezone,
                    additional_notes, status, price_paid, created_at, completed_at,
-                   previous_request_id, pricing_type, follow_up_discount
+                   previous_request_id, pricing_type, follow_up_discount,
+                   proposed_price, proposed_candidates, scope_proposed_at, scope_approval_notes
             FROM shortlist_requests
             WHERE id = @ShortlistId AND company_id = @CompanyId",
             new { ShortlistId = shortlistId, CompanyId = companyId });
@@ -426,7 +430,12 @@ public class ShortlistService : IShortlistService
             PricingType = shortlist.pricing_type as string ?? "new",
             FollowUpDiscount = shortlist.follow_up_discount as decimal? ?? 0,
             NewCandidatesCount = newCandidatesCount,
-            RepeatedCandidatesCount = repeatedCandidatesCount
+            RepeatedCandidatesCount = repeatedCandidatesCount,
+            // Pricing proposal fields
+            ProposedPrice = shortlist.proposed_price as decimal?,
+            ProposedCandidates = shortlist.proposed_candidates as int?,
+            ScopeProposedAt = shortlist.scope_proposed_at as DateTime?,
+            ScopeNotes = shortlist.scope_approval_notes as string
         };
     }
 
@@ -440,6 +449,7 @@ public class ShortlistService : IShortlistService
                    sr.location_timezone, sr.additional_notes, sr.status,
                    sr.price_paid, sr.created_at, sr.completed_at,
                    sr.previous_request_id, sr.pricing_type, sr.follow_up_discount,
+                   sr.proposed_price, sr.proposed_candidates, sr.scope_proposed_at, sr.scope_approval_notes,
                    COUNT(sc.id) as candidates_count,
                    COUNT(CASE WHEN sc.is_new = TRUE THEN 1 END) as new_candidates_count,
                    COUNT(CASE WHEN sc.is_new = FALSE THEN 1 END) as repeated_candidates_count
@@ -450,7 +460,8 @@ public class ShortlistService : IShortlistService
                      sr.location_preference, sr.is_remote, sr.location_country, sr.location_city,
                      sr.location_timezone, sr.additional_notes, sr.status,
                      sr.price_paid, sr.created_at, sr.completed_at,
-                     sr.previous_request_id, sr.pricing_type, sr.follow_up_discount
+                     sr.previous_request_id, sr.pricing_type, sr.follow_up_discount,
+                     sr.proposed_price, sr.proposed_candidates, sr.scope_proposed_at, sr.scope_approval_notes
             ORDER BY sr.created_at DESC",
             new { CompanyId = companyId });
 
@@ -482,7 +493,12 @@ public class ShortlistService : IShortlistService
                 PricingType = s.pricing_type as string ?? "new",
                 FollowUpDiscount = s.follow_up_discount as decimal? ?? 0,
                 NewCandidatesCount = (int)(s.new_candidates_count ?? 0),
-                RepeatedCandidatesCount = (int)(s.repeated_candidates_count ?? 0)
+                RepeatedCandidatesCount = (int)(s.repeated_candidates_count ?? 0),
+                // Pricing proposal fields
+                ProposedPrice = s.proposed_price as decimal?,
+                ProposedCandidates = s.proposed_candidates as int?,
+                ScopeProposedAt = s.scope_proposed_at as DateTime?,
+                ScopeNotes = s.scope_approval_notes as string
             };
         }).ToList();
     }
@@ -503,7 +519,7 @@ public class ShortlistService : IShortlistService
 
         await connection.ExecuteAsync(
             "UPDATE shortlist_requests SET status = @Status WHERE id = @Id",
-            new { Status = (int)ShortlistStatus.Matching, Id = shortlistId });
+            new { Status = (int)ShortlistStatus.Processing, Id = shortlistId });
 
         // Check if this is a follow-up shortlist
         var previousRequestId = shortlist.previous_request_id as Guid?;
@@ -541,7 +557,7 @@ public class ShortlistService : IShortlistService
             LocationCity = shortlist.location_city as string,
             LocationTimezone = shortlist.location_timezone as string,
             AdditionalNotes = shortlist.additional_notes as string,
-            Status = ShortlistStatus.Matching
+            Status = ShortlistStatus.Processing
         };
 
         // Find matches with candidate exclusion and freshness boost
@@ -705,7 +721,22 @@ public class ShortlistService : IShortlistService
             }
         }
 
-        // Finalize payment if there is one
+        // Step 1: Mark shortlist as Delivered (candidates now visible to company)
+        var now = DateTime.UtcNow;
+        await connection.ExecuteAsync(@"
+            UPDATE shortlist_requests
+            SET status = @Status, delivered_at = @DeliveredAt
+            WHERE id = @ShortlistRequestId",
+            new
+            {
+                Status = (int)ShortlistStatus.Delivered,
+                DeliveredAt = now,
+                ShortlistRequestId = shortlistRequestId
+            });
+
+        _logger.LogInformation("Shortlist {ShortlistId} delivered at {DeliveredAt}", shortlistRequestId, now);
+
+        // Step 2: Capture payment AFTER delivery
         string paymentAction = "no_payment";
         decimal amountCaptured = 0;
 
@@ -724,29 +755,66 @@ public class ShortlistService : IShortlistService
 
             if (!finalizationResult.Success)
             {
+                // CRITICAL: Delivery succeeded but capture failed
+                // Lock candidate visibility and flag for manual resolution
+                _logger.LogError(
+                    "Payment capture failed for shortlist {ShortlistId} after delivery. Manual resolution required. Error: {Error}",
+                    shortlistRequestId, finalizationResult.ErrorMessage);
+
+                // Mark shortlist with capture failure - do NOT change delivered status
+                await connection.ExecuteAsync(@"
+                    UPDATE shortlist_requests
+                    SET cancellation_reason = @Reason
+                    WHERE id = @ShortlistRequestId",
+                    new
+                    {
+                        Reason = $"CAPTURE_FAILED: {finalizationResult.ErrorMessage}",
+                        ShortlistRequestId = shortlistRequestId
+                    });
+
                 return new ShortlistDeliveryResult
                 {
-                    Success = false,
-                    ErrorMessage = finalizationResult.ErrorMessage
+                    Success = true, // Delivery succeeded
+                    PaymentAction = "capture_failed",
+                    AmountCaptured = 0,
+                    ErrorMessage = $"Shortlist delivered but payment capture failed: {finalizationResult.ErrorMessage}"
                 };
             }
 
             paymentAction = finalizationResult.Action;
             amountCaptured = finalizationResult.AmountCaptured;
-        }
 
-        // Mark shortlist as completed
-        await connection.ExecuteAsync(@"
-            UPDATE shortlist_requests
-            SET status = @Status, completed_at = @CompletedAt, final_price = @FinalPrice
-            WHERE id = @ShortlistRequestId",
-            new
-            {
-                Status = (int)ShortlistStatus.Delivered,
-                CompletedAt = DateTime.UtcNow,
-                FinalPrice = amountCaptured > 0 ? amountCaptured : (decimal?)null,
-                ShortlistRequestId = shortlistRequestId
-            });
+            // Step 3: Mark as Completed after successful capture
+            await connection.ExecuteAsync(@"
+                UPDATE shortlist_requests
+                SET status = @Status, completed_at = @CompletedAt, final_price = @FinalPrice
+                WHERE id = @ShortlistRequestId",
+                new
+                {
+                    Status = (int)ShortlistStatus.Completed,
+                    CompletedAt = DateTime.UtcNow,
+                    FinalPrice = amountCaptured,
+                    ShortlistRequestId = shortlistRequestId
+                });
+
+            _logger.LogInformation(
+                "Payment captured for shortlist {ShortlistId}. Action: {Action}, Amount: {Amount}",
+                shortlistRequestId, paymentAction, amountCaptured);
+        }
+        else if (!paymentId.HasValue)
+        {
+            // No payment associated - mark as completed directly
+            await connection.ExecuteAsync(@"
+                UPDATE shortlist_requests
+                SET status = @Status, completed_at = @CompletedAt
+                WHERE id = @ShortlistRequestId",
+                new
+                {
+                    Status = (int)ShortlistStatus.Completed,
+                    CompletedAt = DateTime.UtcNow,
+                    ShortlistRequestId = shortlistRequestId
+                });
+        }
 
         // Send shortlist delivered email to company (fire and forget)
         var companyEmail = shortlist.company_email as string;
@@ -836,9 +904,10 @@ Declining will not affect your visibility for future opportunities.";
             return new ScopeProposalResult { Success = false, ErrorMessage = "Shortlist not found" };
         }
 
-        if ((int)shortlist.status != (int)ShortlistStatus.Draft)
+        var currentStatus = (ShortlistStatus)(int)shortlist.status;
+        if (currentStatus != ShortlistStatus.Submitted && currentStatus != ShortlistStatus.Processing)
         {
-            return new ScopeProposalResult { Success = false, ErrorMessage = "Shortlist is not pending scope review" };
+            return new ScopeProposalResult { Success = false, ErrorMessage = $"Cannot set pricing: shortlist is in {currentStatus} status. Must be Submitted or Processing." };
         }
 
         // Update with proposed scope and price
@@ -852,7 +921,7 @@ Declining will not affect your visibility for future opportunities.";
             WHERE id = @Id",
             new
             {
-                Status = (int)ShortlistStatus.PricingRequested,
+                Status = (int)ShortlistStatus.PricingPending,
                 ProposedCandidates = request.ProposedCandidates,
                 ProposedPrice = request.ProposedPrice,
                 Now = DateTime.UtcNow,
@@ -889,7 +958,7 @@ Declining will not affect your visibility for future opportunities.";
             return new ScopeApprovalResult { Success = false, ErrorMessage = "Shortlist not found" };
         }
 
-        if ((int)shortlist.status != (int)ShortlistStatus.PricingRequested)
+        if ((int)shortlist.status != (int)ShortlistStatus.PricingPending)
         {
             return new ScopeApprovalResult { Success = false, ErrorMessage = "Shortlist does not have a pending scope proposal" };
         }
@@ -943,6 +1012,156 @@ Declining will not affect your visibility for future opportunities.";
         };
     }
 
+    /// <summary>
+    /// Step 3: Company approves pricing (no payment yet)
+    /// </summary>
+    public async Task ApprovePricingAsync(Guid companyId, Guid shortlistRequestId)
+    {
+        using var connection = _db.CreateConnection();
+
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT id, status, proposed_price
+            FROM shortlist_requests
+            WHERE id = @Id AND company_id = @CompanyId",
+            new { Id = shortlistRequestId, CompanyId = companyId });
+
+        if (shortlist == null)
+        {
+            throw new InvalidOperationException("Shortlist not found");
+        }
+
+        if ((int)shortlist.status != (int)ShortlistStatus.PricingPending)
+        {
+            throw new InvalidOperationException($"Cannot approve pricing: shortlist is not in PricingPending status (current: {(ShortlistStatus)(int)shortlist.status})");
+        }
+
+        if (shortlist.proposed_price == null || (decimal)shortlist.proposed_price <= 0)
+        {
+            throw new InvalidOperationException("Cannot approve pricing: no valid price has been set");
+        }
+
+        await connection.ExecuteAsync(@"
+            UPDATE shortlist_requests
+            SET status = @Status, pricing_approved_at = @Now, price_amount = proposed_price
+            WHERE id = @Id",
+            new
+            {
+                Status = (int)ShortlistStatus.PricingApproved,
+                Now = DateTime.UtcNow,
+                Id = shortlistRequestId
+            });
+    }
+
+    /// <summary>
+    /// Company declines pricing - returns to Processing so admin can propose new price
+    /// </summary>
+    public async Task DeclinePricingAsync(Guid companyId, Guid shortlistRequestId, string? reason)
+    {
+        using var connection = _db.CreateConnection();
+
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT id, status, proposed_price
+            FROM shortlist_requests
+            WHERE id = @Id AND company_id = @CompanyId",
+            new { Id = shortlistRequestId, CompanyId = companyId });
+
+        if (shortlist == null)
+        {
+            throw new InvalidOperationException("Shortlist not found");
+        }
+
+        if ((int)shortlist.status != (int)ShortlistStatus.PricingPending)
+        {
+            throw new InvalidOperationException($"Cannot decline pricing: shortlist is not in PricingPending status (current: {(ShortlistStatus)(int)shortlist.status})");
+        }
+
+        await connection.ExecuteAsync(@"
+            UPDATE shortlist_requests
+            SET status = @Status,
+                proposed_price = NULL,
+                proposed_candidates = NULL,
+                scope_proposed_at = NULL,
+                scope_approval_notes = CASE WHEN @Reason IS NOT NULL THEN COALESCE(scope_approval_notes || E'\n', '') || 'Declined: ' || @Reason ELSE scope_approval_notes END
+            WHERE id = @Id",
+            new
+            {
+                Status = (int)ShortlistStatus.Processing,
+                Reason = reason,
+                Id = shortlistRequestId
+            });
+    }
+
+    /// <summary>
+    /// Step 4: Authorize payment (hold funds, no capture)
+    /// </summary>
+    public async Task<PaymentAuthorizationResult> AuthorizePaymentAsync(Guid companyId, Guid shortlistRequestId, string provider)
+    {
+        using var connection = _db.CreateConnection();
+
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT id, status, price_amount, proposed_price
+            FROM shortlist_requests
+            WHERE id = @Id AND company_id = @CompanyId",
+            new { Id = shortlistRequestId, CompanyId = companyId });
+
+        if (shortlist == null)
+        {
+            throw new InvalidOperationException("Shortlist not found");
+        }
+
+        if ((int)shortlist.status != (int)ShortlistStatus.PricingApproved)
+        {
+            throw new InvalidOperationException($"Cannot authorize payment: pricing must be approved first (current: {(ShortlistStatus)(int)shortlist.status})");
+        }
+
+        decimal amount = shortlist.price_amount ?? shortlist.proposed_price;
+        if (amount <= 0)
+        {
+            throw new InvalidOperationException("Cannot authorize payment: no valid price");
+        }
+
+        // Initiate payment authorization
+        var paymentRequest = new PaymentInitiationRequest
+        {
+            CompanyId = companyId,
+            ShortlistRequestId = shortlistRequestId,
+            Amount = amount,
+            Currency = "USD",
+            Provider = provider,
+            Description = $"Shortlist authorization for request {shortlistRequestId}"
+        };
+
+        var paymentResult = await _paymentService.InitiatePaymentAsync(paymentRequest);
+
+        if (!paymentResult.Success)
+        {
+            // Authorization failed - keep status at PricingApproved so company can retry
+            throw new InvalidOperationException(paymentResult.ErrorMessage ?? "Payment authorization failed");
+        }
+
+        // Link payment to shortlist but do NOT set to Authorized yet
+        // Status will be set to Authorized after frontend confirms with Stripe
+        await connection.ExecuteAsync(@"
+            UPDATE shortlist_requests
+            SET payment_id = @PaymentId, payment_authorization_id = @AuthId
+            WHERE id = @Id",
+            new
+            {
+                PaymentId = paymentResult.PaymentId,
+                AuthId = paymentResult.ClientSecret ?? paymentResult.ApprovalUrl ?? paymentResult.EscrowAddress,
+                Id = shortlistRequestId
+            });
+
+        return new PaymentAuthorizationResult
+        {
+            Success = true,
+            PaymentId = paymentResult.PaymentId ?? Guid.Empty,
+            ClientSecret = paymentResult.ClientSecret,
+            ApprovalUrl = paymentResult.ApprovalUrl,
+            EscrowAddress = paymentResult.EscrowAddress
+        };
+    }
+
     public async Task<List<ScopeProposalResponse>> GetPendingScopeProposalsAsync(Guid companyId)
     {
         using var connection = _db.CreateConnection();
@@ -952,7 +1171,7 @@ Declining will not affect your visibility for future opportunities.";
             FROM shortlist_requests
             WHERE company_id = @CompanyId AND status = @Status
             ORDER BY scope_proposed_at DESC",
-            new { CompanyId = companyId, Status = (int)ShortlistStatus.PricingRequested });
+            new { CompanyId = companyId, Status = (int)ShortlistStatus.PricingPending });
 
         return proposals.Select(p => new ScopeProposalResponse
         {

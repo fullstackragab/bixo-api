@@ -151,7 +151,10 @@ public class PaymentService : IPaymentService
         using var connection = _db.CreateConnection();
 
         var payment = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
-            SELECT id, provider, provider_reference, status FROM payments WHERE id = @PaymentId",
+            SELECT p.id, p.provider, p.provider_reference, p.status, sr.id as shortlist_id
+            FROM payments p
+            LEFT JOIN shortlist_requests sr ON sr.payment_id = p.id
+            WHERE p.id = @PaymentId",
             new { PaymentId = paymentId });
 
         if (payment == null)
@@ -178,10 +181,31 @@ public class PaymentService : IPaymentService
                 new { ProviderReference = providerReference, UpdatedAt = DateTime.UtcNow, PaymentId = paymentId });
         }
 
-        // Update status
+        // Update payment status
         await connection.ExecuteAsync(@"
             UPDATE payments SET status = @Status, updated_at = @UpdatedAt WHERE id = @PaymentId",
             new { Status = newStatus, UpdatedAt = DateTime.UtcNow, PaymentId = paymentId });
+
+        // Update shortlist status to Authorized
+        // CRITICAL: Only now is the payment confirmed and funds held
+        var shortlistId = payment.shortlist_id as Guid?;
+        if (shortlistId.HasValue)
+        {
+            await connection.ExecuteAsync(@"
+                UPDATE shortlist_requests
+                SET status = @Status
+                WHERE id = @ShortlistId AND status = @PricingApprovedStatus",
+                new
+                {
+                    Status = (int)Models.Enums.ShortlistStatus.Authorized,
+                    ShortlistId = shortlistId.Value,
+                    PricingApprovedStatus = (int)Models.Enums.ShortlistStatus.PricingApproved
+                });
+
+            _logger.LogInformation(
+                "Shortlist {ShortlistId} status set to Authorized after payment confirmation",
+                shortlistId.Value);
+        }
 
         await LogPaymentAuditAsync(connection, paymentId, currentStatus, newStatus, "authorization_confirmed", null);
 
@@ -359,6 +383,88 @@ public class PaymentService : IPaymentService
             AmountCaptured = (decimal)payment.amount_captured,
             CreatedAt = (DateTime)payment.created_at
         };
+    }
+
+    public async Task<bool> IsAuthorizationValidAsync(Guid paymentId)
+    {
+        using var connection = _db.CreateConnection();
+
+        var payment = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT provider, provider_reference, status FROM payments WHERE id = @PaymentId",
+            new { PaymentId = paymentId });
+
+        if (payment == null)
+        {
+            return false;
+        }
+
+        var status = (string)payment.status;
+        if (status != "authorized")
+        {
+            return false;
+        }
+
+        var providerName = (string)payment.provider;
+        var providerReference = (string)payment.provider_reference;
+
+        if (!_providers.TryGetValue(providerName, out var provider))
+        {
+            _logger.LogWarning("Provider {Provider} not found for payment {PaymentId}", providerName, paymentId);
+            return false;
+        }
+
+        // Check with provider if authorization is still valid
+        return await provider.IsAuthorizationValidAsync(providerReference);
+    }
+
+    public async Task HandleExpiredAuthorizationAsync(Guid paymentId)
+    {
+        using var connection = _db.CreateConnection();
+
+        var payment = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT p.id, p.status, sr.id as shortlist_id
+            FROM payments p
+            LEFT JOIN shortlist_requests sr ON sr.payment_id = p.id
+            WHERE p.id = @PaymentId",
+            new { PaymentId = paymentId });
+
+        if (payment == null)
+        {
+            _logger.LogWarning("Payment not found for expiry handling: {PaymentId}", paymentId);
+            return;
+        }
+
+        var currentStatus = (string)payment.status;
+        if (currentStatus != "authorized")
+        {
+            return; // Only handle authorized payments
+        }
+
+        // Update payment status to expired
+        await connection.ExecuteAsync(@"
+            UPDATE payments SET status = 'expired', updated_at = @UpdatedAt WHERE id = @PaymentId",
+            new { UpdatedAt = DateTime.UtcNow, PaymentId = paymentId });
+
+        // Revert shortlist to PricingApproved - company must re-authorize
+        var shortlistId = payment.shortlist_id as Guid?;
+        if (shortlistId.HasValue)
+        {
+            await connection.ExecuteAsync(@"
+                UPDATE shortlist_requests
+                SET status = @Status, payment_id = NULL, payment_authorization_id = NULL
+                WHERE id = @ShortlistId",
+                new
+                {
+                    Status = (int)Models.Enums.ShortlistStatus.PricingApproved,
+                    ShortlistId = shortlistId.Value
+                });
+
+            _logger.LogWarning(
+                "Authorization expired for payment {PaymentId}. Shortlist {ShortlistId} reverted to PricingApproved.",
+                paymentId, shortlistId.Value);
+        }
+
+        await LogPaymentAuditAsync(connection, paymentId, currentStatus, "expired", "authorization_expired", null);
     }
 
     private async Task LogPaymentAuditAsync(
@@ -555,6 +661,20 @@ public class PaymentService : IPaymentService
 
             switch (stripeEvent.Type)
             {
+                // === PaymentIntent events (authorization flow) ===
+                case "payment_intent.amount_capturable_updated":
+                    await HandlePaymentIntentAuthorized((PaymentIntent)stripeEvent.Data.Object);
+                    break;
+
+                case "payment_intent.payment_failed":
+                    await HandlePaymentIntentFailed((PaymentIntent)stripeEvent.Data.Object);
+                    break;
+
+                case "payment_intent.canceled":
+                    await HandlePaymentIntentCanceled((PaymentIntent)stripeEvent.Data.Object);
+                    break;
+
+                // === Checkout/Subscription events (legacy) ===
                 case "checkout.session.completed":
                     await HandleCheckoutCompleted((Session)stripeEvent.Data.Object);
                     break;
@@ -783,5 +903,149 @@ public class PaymentService : IPaymentService
     {
         _logger.LogWarning("Payment failed for invoice: {InvoiceId}", invoice.Id);
         await Task.CompletedTask;
+    }
+
+    // === PaymentIntent Webhook Handlers ===
+
+    private async Task HandlePaymentIntentAuthorized(PaymentIntent paymentIntent)
+    {
+        // This is called when authorization is confirmed (amount_capturable_updated)
+        using var connection = _db.CreateConnection();
+
+        var payment = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT p.id, p.status, sr.id as shortlist_id
+            FROM payments p
+            LEFT JOIN shortlist_requests sr ON sr.payment_id = p.id
+            WHERE p.provider_reference = @ProviderReference",
+            new { ProviderReference = paymentIntent.Id });
+
+        if (payment == null)
+        {
+            _logger.LogWarning("Payment not found for PaymentIntent: {PaymentIntentId}", paymentIntent.Id);
+            return;
+        }
+
+        var paymentId = (Guid)payment.id;
+        var currentStatus = (string)payment.status;
+
+        // Only process if in pending_approval status
+        if (currentStatus != "pending_approval")
+        {
+            _logger.LogInformation(
+                "PaymentIntent {PaymentIntentId} already processed, current status: {Status}",
+                paymentIntent.Id, currentStatus);
+            return;
+        }
+
+        // Update payment to authorized
+        await connection.ExecuteAsync(@"
+            UPDATE payments SET status = 'authorized', updated_at = @UpdatedAt WHERE id = @PaymentId",
+            new { UpdatedAt = DateTime.UtcNow, PaymentId = paymentId });
+
+        // Update shortlist to Authorized
+        var shortlistId = payment.shortlist_id as Guid?;
+        if (shortlistId.HasValue)
+        {
+            await connection.ExecuteAsync(@"
+                UPDATE shortlist_requests
+                SET status = @Status
+                WHERE id = @ShortlistId AND status = @PricingApprovedStatus",
+                new
+                {
+                    Status = (int)Models.Enums.ShortlistStatus.Authorized,
+                    ShortlistId = shortlistId.Value,
+                    PricingApprovedStatus = (int)Models.Enums.ShortlistStatus.PricingApproved
+                });
+        }
+
+        await LogPaymentAuditAsync(connection, paymentId, currentStatus, "authorized", "webhook_authorized", null);
+
+        _logger.LogInformation(
+            "PaymentIntent {PaymentIntentId} authorized via webhook. Payment: {PaymentId}, Shortlist: {ShortlistId}",
+            paymentIntent.Id, paymentId, shortlistId);
+    }
+
+    private async Task HandlePaymentIntentFailed(PaymentIntent paymentIntent)
+    {
+        using var connection = _db.CreateConnection();
+
+        var payment = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT id, status FROM payments WHERE provider_reference = @ProviderReference",
+            new { ProviderReference = paymentIntent.Id });
+
+        if (payment == null)
+        {
+            _logger.LogWarning("Payment not found for failed PaymentIntent: {PaymentIntentId}", paymentIntent.Id);
+            return;
+        }
+
+        var paymentId = (Guid)payment.id;
+        var currentStatus = (string)payment.status;
+
+        var errorMessage = paymentIntent.LastPaymentError?.Message ?? "Payment failed";
+
+        await connection.ExecuteAsync(@"
+            UPDATE payments SET status = 'failed', error_message = @ErrorMessage, updated_at = @UpdatedAt
+            WHERE id = @PaymentId",
+            new { ErrorMessage = errorMessage, UpdatedAt = DateTime.UtcNow, PaymentId = paymentId });
+
+        await LogPaymentAuditAsync(connection, paymentId, currentStatus, "failed", "webhook_payment_failed",
+            new { paymentIntent.LastPaymentError?.Code, paymentIntent.LastPaymentError?.Message });
+
+        _logger.LogWarning(
+            "PaymentIntent {PaymentIntentId} failed. Payment: {PaymentId}. Error: {Error}",
+            paymentIntent.Id, paymentId, errorMessage);
+    }
+
+    private async Task HandlePaymentIntentCanceled(PaymentIntent paymentIntent)
+    {
+        using var connection = _db.CreateConnection();
+
+        var payment = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT p.id, p.status, sr.id as shortlist_id
+            FROM payments p
+            LEFT JOIN shortlist_requests sr ON sr.payment_id = p.id
+            WHERE p.provider_reference = @ProviderReference",
+            new { ProviderReference = paymentIntent.Id });
+
+        if (payment == null)
+        {
+            _logger.LogWarning("Payment not found for canceled PaymentIntent: {PaymentIntentId}", paymentIntent.Id);
+            return;
+        }
+
+        var paymentId = (Guid)payment.id;
+        var currentStatus = (string)payment.status;
+
+        // Determine if this is an expiration or manual cancellation
+        var reason = paymentIntent.CancellationReason ?? "canceled";
+        var newStatus = reason == "automatic" ? "expired" : "released";
+
+        await connection.ExecuteAsync(@"
+            UPDATE payments SET status = @Status, updated_at = @UpdatedAt WHERE id = @PaymentId",
+            new { Status = newStatus, UpdatedAt = DateTime.UtcNow, PaymentId = paymentId });
+
+        // Revert shortlist to PricingApproved if it was in Authorized state
+        var shortlistId = payment.shortlist_id as Guid?;
+        if (shortlistId.HasValue)
+        {
+            await connection.ExecuteAsync(@"
+                UPDATE shortlist_requests
+                SET status = @Status, payment_id = NULL, payment_authorization_id = NULL
+                WHERE id = @ShortlistId AND status = @AuthorizedStatus",
+                new
+                {
+                    Status = (int)Models.Enums.ShortlistStatus.PricingApproved,
+                    ShortlistId = shortlistId.Value,
+                    AuthorizedStatus = (int)Models.Enums.ShortlistStatus.Authorized
+                });
+        }
+
+        await LogPaymentAuditAsync(connection, paymentId, currentStatus, newStatus, $"webhook_{reason}",
+            new { paymentIntent.CancellationReason });
+
+        _logger.LogInformation(
+            "PaymentIntent {PaymentIntentId} canceled ({Reason}). Payment: {PaymentId} -> {Status}",
+            paymentIntent.Id, reason, paymentId, newStatus);
     }
 }

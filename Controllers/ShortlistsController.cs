@@ -122,50 +122,108 @@ public class ShortlistsController : ControllerBase
     }
 
     /// <summary>
-    /// Get pending scope proposals for the company
+    /// Get shortlists awaiting pricing approval
     /// </summary>
-    [HttpGet("scope/pending")]
-    public async Task<ActionResult<ApiResponse<List<ScopeProposalResponse>>>> GetPendingScopeProposals()
+    [HttpGet("pricing/pending")]
+    public async Task<ActionResult<ApiResponse<List<ScopeProposalResponse>>>> GetPendingPricingApprovals()
     {
         var proposals = await _shortlistService.GetPendingScopeProposalsAsync(GetCompanyId());
         return Ok(ApiResponse<List<ScopeProposalResponse>>.Ok(proposals));
     }
 
     /// <summary>
-    /// Approve proposed scope and price, triggering payment authorization.
-    /// This is the ONLY point where payment authorization occurs.
+    /// Step 3a: Company approves the pricing set by admin.
+    /// Does NOT trigger payment - just confirms price agreement.
     /// </summary>
-    [HttpPost("{id}/scope/approve")]
-    public async Task<ActionResult<ApiResponse<ScopeApprovalResponse>>> ApproveScope(Guid id, [FromBody] ApproveScopeRequest request)
+    [HttpPost("{id}/pricing/approve")]
+    public async Task<ActionResult<ApiResponse>> ApprovePricing(Guid id)
     {
-        if (!request.ConfirmApproval)
+        try
         {
-            return BadRequest(ApiResponse<ScopeApprovalResponse>.Fail(
-                "Explicit approval confirmation required. Set confirmApproval to true."));
+            await _shortlistService.ApprovePricingAsync(GetCompanyId(), id);
+            return Ok(ApiResponse.Ok("Pricing approved. You can now authorize payment."));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(ApiResponse.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// Step 3b: Company declines the pricing set by admin.
+    /// Returns shortlist to Processing so admin can propose a new price.
+    /// </summary>
+    [HttpPut("{id}/scope/decline")]
+    public async Task<ActionResult<ApiResponse>> DeclinePricing(Guid id, [FromBody] DeclinePricingRequest? request = null)
+    {
+        try
+        {
+            await _shortlistService.DeclinePricingAsync(GetCompanyId(), id, request?.Reason);
+            return Ok(ApiResponse.Ok("Pricing declined. A new price will be proposed."));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(ApiResponse.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// Step 4: Authorize payment (hold funds, no capture yet).
+    /// Requires pricing to be approved first.
+    /// </summary>
+    [HttpPost("{id}/payment/authorize")]
+    public async Task<ActionResult<ApiResponse<PaymentAuthorizationResponse>>> AuthorizePayment(
+        Guid id,
+        [FromBody] AuthorizePaymentRequest request)
+    {
+        try
+        {
+            var result = await _shortlistService.AuthorizePaymentAsync(GetCompanyId(), id, request.Provider ?? "stripe");
+
+            return Ok(ApiResponse<PaymentAuthorizationResponse>.Ok(new PaymentAuthorizationResponse
+            {
+                PaymentId = result.PaymentId,
+                ClientSecret = result.ClientSecret,
+                ApprovalUrl = result.ApprovalUrl,
+                EscrowAddress = result.EscrowAddress
+            }, "Payment authorized. Awaiting delivery."));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(ApiResponse<PaymentAuthorizationResponse>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// Step 5: Get delivered shortlist (candidates exposed after delivery).
+    /// Delivery is triggered by admin, but company can view once delivered.
+    /// </summary>
+    [HttpGet("{id}/delivered")]
+    public async Task<ActionResult<ApiResponse<ShortlistDetailResponse>>> GetDeliveredShortlist(Guid id)
+    {
+        var companyId = GetCompanyId();
+        using var connection = _db.CreateConnection();
+
+        // Verify shortlist is delivered
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT id, status FROM shortlist_requests
+            WHERE id = @Id AND company_id = @CompanyId",
+            new { Id = id, CompanyId = companyId });
+
+        if (shortlist == null)
+        {
+            return NotFound(ApiResponse<ShortlistDetailResponse>.Fail("Shortlist not found"));
         }
 
-        var approvalRequest = new ScopeApprovalRequest
+        var status = (int)shortlist.status;
+        if (status < (int)Models.Enums.ShortlistStatus.Delivered)
         {
-            Provider = request.Provider ?? "stripe",
-            ConfirmApproval = request.ConfirmApproval
-        };
-
-        var result = await _shortlistService.ApproveScopeAsync(GetCompanyId(), id, approvalRequest);
-
-        if (!result.Success)
-        {
-            return BadRequest(ApiResponse<ScopeApprovalResponse>.Fail(result.ErrorMessage ?? "Scope approval failed"));
+            return BadRequest(ApiResponse<ShortlistDetailResponse>.Fail(
+                "Shortlist has not been delivered yet. Candidates are not visible until delivery."));
         }
 
-        var response = new ScopeApprovalResponse
-        {
-            PaymentId = result.PaymentId!.Value,
-            ClientSecret = result.ClientSecret,
-            ApprovalUrl = result.ApprovalUrl,
-            EscrowAddress = result.EscrowAddress
-        };
-
-        return Ok(ApiResponse<ScopeApprovalResponse>.Ok(response, "Scope approved and payment authorized"));
+        var result = await _shortlistService.GetShortlistAsync(companyId, id);
+        return Ok(ApiResponse<ShortlistDetailResponse>.Ok(result));
     }
 
     /// <summary>
@@ -436,4 +494,24 @@ public class ScopeApprovalResponse
     public string? ClientSecret { get; set; }
     public string? ApprovalUrl { get; set; }
     public string? EscrowAddress { get; set; }
+}
+
+public class AuthorizePaymentRequest
+{
+    /// <summary>Payment provider: stripe | paypal | crypto</summary>
+    public string? Provider { get; set; }
+}
+
+public class PaymentAuthorizationResponse
+{
+    public Guid PaymentId { get; set; }
+    public string? ClientSecret { get; set; }
+    public string? ApprovalUrl { get; set; }
+    public string? EscrowAddress { get; set; }
+}
+
+public class DeclinePricingRequest
+{
+    /// <summary>Optional reason for declining the pricing</summary>
+    public string? Reason { get; set; }
 }
