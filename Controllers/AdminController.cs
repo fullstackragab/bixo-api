@@ -34,7 +34,7 @@ public class AdminController : ControllerBase
             TotalCompanies = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM companies"),
             PendingShortlists = await connection.ExecuteScalarAsync<int>($"SELECT COUNT(*) FROM shortlist_requests WHERE status IN ({(int)ShortlistStatus.Pending}, {(int)ShortlistStatus.Processing})"),
             CompletedShortlists = await connection.ExecuteScalarAsync<int>($"SELECT COUNT(*) FROM shortlist_requests WHERE status = {(int)ShortlistStatus.Completed}"),
-            TotalRevenue = await connection.ExecuteScalarAsync<decimal?>($"SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = {(int)PaymentStatus.Completed}") ?? 0,
+            TotalRevenue = await connection.ExecuteScalarAsync<decimal?>($"SELECT COALESCE(SUM(amount_captured), 0) FROM payments WHERE status IN ('{PaymentStatus.Captured.ToString().ToLower()}', '{PaymentStatus.Partial.ToString().ToLower()}')") ?? 0,
             RecentSignups = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM users WHERE created_at >= @Cutoff", new { Cutoff = DateTime.UtcNow.AddDays(-7) })
         };
 
@@ -481,22 +481,49 @@ public class AdminController : ControllerBase
     }
 
     [HttpPost("shortlists/{id}/deliver")]
-    public async Task<ActionResult<ApiResponse>> DeliverShortlist(Guid id)
+    public async Task<ActionResult<ApiResponse<DeliverShortlistResponse>>> DeliverShortlist(Guid id, [FromBody] DeliverShortlistRequest? request = null)
     {
         using var connection = _db.CreateConnection();
 
-        var rowsAffected = await connection.ExecuteAsync(@"
-            UPDATE shortlist_requests
-            SET status = @Status, completed_at = @CompletedAt
-            WHERE id = @Id",
-            new { Status = (int)ShortlistStatus.Completed, CompletedAt = DateTime.UtcNow, Id = id });
+        // Get candidate counts for delivery
+        var candidateInfo = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT
+                (SELECT COUNT(*) FROM shortlist_candidates WHERE shortlist_request_id = @Id AND admin_approved = TRUE) as approved_count,
+                (SELECT COUNT(*) FROM shortlist_candidates WHERE shortlist_request_id = @Id) as total_count
+            FROM shortlist_requests WHERE id = @Id",
+            new { Id = id });
 
-        if (rowsAffected == 0)
+        if (candidateInfo == null)
         {
-            return NotFound(ApiResponse.Fail("Shortlist not found"));
+            return NotFound(ApiResponse<DeliverShortlistResponse>.Fail("Shortlist not found"));
         }
 
-        return Ok(ApiResponse.Ok("Shortlist delivered"));
+        var approvedCount = (int)(candidateInfo.approved_count ?? 0);
+        var totalCount = (int)(candidateInfo.total_count ?? 0);
+
+        var deliveryRequest = new ShortlistDeliveryRequest
+        {
+            CandidatesRequested = request?.CandidatesRequested ?? totalCount,
+            CandidatesDelivered = request?.CandidatesDelivered ?? approvedCount,
+            OverridePrice = request?.OverridePrice,
+            Notes = request?.Notes
+        };
+
+        var result = await _shortlistService.DeliverShortlistAsync(id, deliveryRequest);
+
+        if (!result.Success)
+        {
+            return BadRequest(ApiResponse<DeliverShortlistResponse>.Fail(result.ErrorMessage ?? "Failed to deliver shortlist"));
+        }
+
+        var response = new DeliverShortlistResponse
+        {
+            PaymentAction = result.PaymentAction,
+            AmountCaptured = result.AmountCaptured,
+            CandidatesDelivered = deliveryRequest.CandidatesDelivered
+        };
+
+        return Ok(ApiResponse<DeliverShortlistResponse>.Ok(response, "Shortlist delivered"));
     }
 
     // Support Messages Admin Endpoints
@@ -843,4 +870,19 @@ public class AdminSupportMessageDetailResponse
 public class UpdateSupportMessageStatusRequest
 {
     public object? Status { get; set; }
+}
+
+public class DeliverShortlistRequest
+{
+    public int? CandidatesRequested { get; set; }
+    public int? CandidatesDelivered { get; set; }
+    public decimal? OverridePrice { get; set; }
+    public string? Notes { get; set; }
+}
+
+public class DeliverShortlistResponse
+{
+    public string PaymentAction { get; set; } = string.Empty;
+    public decimal AmountCaptured { get; set; }
+    public int CandidatesDelivered { get; set; }
 }

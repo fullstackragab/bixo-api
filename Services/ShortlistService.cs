@@ -14,6 +14,7 @@ public class ShortlistService : IShortlistService
     private readonly IDbConnectionFactory _db;
     private readonly IMatchingService _matchingService;
     private readonly IEmailService _emailService;
+    private readonly IPaymentService _paymentService;
 
     // Similarity threshold for detecting follow-up shortlists (0-100)
     private const int FOLLOW_UP_SIMILARITY_THRESHOLD = 70;
@@ -21,11 +22,19 @@ public class ShortlistService : IShortlistService
     // Default days for follow-up pricing eligibility
     private const int DEFAULT_FOLLOW_UP_DAYS = 30;
 
-    public ShortlistService(IDbConnectionFactory db, IMatchingService matchingService, IEmailService emailService)
+    // Default base price per shortlist
+    private const decimal DEFAULT_BASE_PRICE = 299m;
+
+    public ShortlistService(
+        IDbConnectionFactory db,
+        IMatchingService matchingService,
+        IEmailService emailService,
+        IPaymentService paymentService)
     {
         _db = db;
         _matchingService = matchingService;
         _emailService = emailService;
+        _paymentService = paymentService;
     }
 
     public async Task<List<ShortlistPricingResponse>> GetPricingAsync()
@@ -596,6 +605,151 @@ public class ShortlistService : IShortlistService
         }
 
         return candidates;
+    }
+
+    public async Task<ShortlistPriceEstimate> GetPriceEstimateAsync(Guid shortlistRequestId)
+    {
+        using var connection = _db.CreateConnection();
+
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT id, pricing_type, follow_up_discount,
+                   (SELECT COUNT(*) FROM shortlist_candidates WHERE shortlist_request_id = sr.id AND admin_approved = TRUE) as candidates_count
+            FROM shortlist_requests sr
+            WHERE id = @ShortlistRequestId",
+            new { ShortlistRequestId = shortlistRequestId });
+
+        if (shortlist == null)
+        {
+            return new ShortlistPriceEstimate
+            {
+                ShortlistRequestId = shortlistRequestId,
+                BasePrice = 0,
+                FinalPrice = 0
+            };
+        }
+
+        var pricingType = shortlist.pricing_type as string ?? "new";
+        var followUpDiscount = shortlist.follow_up_discount as decimal? ?? 0;
+        var candidatesCount = (int)(shortlist.candidates_count ?? 0);
+
+        // Get base price from shortlist_pricing table
+        var basePrice = await connection.QueryFirstOrDefaultAsync<decimal?>(@"
+            SELECT price FROM shortlist_pricing
+            WHERE is_active = TRUE
+            ORDER BY shortlist_count
+            LIMIT 1") ?? DEFAULT_BASE_PRICE;
+
+        var discountAmount = basePrice * (followUpDiscount / 100);
+        var finalPrice = basePrice - discountAmount;
+
+        return new ShortlistPriceEstimate
+        {
+            ShortlistRequestId = shortlistRequestId,
+            BasePrice = basePrice,
+            FollowUpDiscount = followUpDiscount,
+            FinalPrice = finalPrice,
+            PricingType = pricingType,
+            CandidatesRequested = candidatesCount
+        };
+    }
+
+    public async Task<ShortlistDeliveryResult> DeliverShortlistAsync(Guid shortlistRequestId, ShortlistDeliveryRequest request)
+    {
+        using var connection = _db.CreateConnection();
+
+        // Verify shortlist exists and has payment
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT sr.id, sr.status, sr.payment_id, p.status as payment_status, p.amount_authorized
+            FROM shortlist_requests sr
+            LEFT JOIN payments p ON p.id = sr.payment_id
+            WHERE sr.id = @ShortlistRequestId",
+            new { ShortlistRequestId = shortlistRequestId });
+
+        if (shortlist == null)
+        {
+            return new ShortlistDeliveryResult
+            {
+                Success = false,
+                ErrorMessage = "Shortlist not found"
+            };
+        }
+
+        var paymentId = shortlist.payment_id as Guid?;
+        var paymentStatus = shortlist.payment_status as string;
+
+        // Determine outcome
+        string outcomeStatus;
+        decimal? discountPercent = null;
+        decimal? finalAmount = request.OverridePrice;
+
+        if (request.CandidatesDelivered == 0)
+        {
+            outcomeStatus = "no_match";
+        }
+        else if (request.CandidatesDelivered >= request.CandidatesRequested)
+        {
+            outcomeStatus = "fulfilled";
+        }
+        else
+        {
+            outcomeStatus = "partial";
+            // Calculate partial discount based on delivery ratio
+            if (!finalAmount.HasValue)
+            {
+                var deliveryRatio = (decimal)request.CandidatesDelivered / request.CandidatesRequested;
+                discountPercent = (1 - deliveryRatio) * 100;
+            }
+        }
+
+        // Finalize payment if there is one
+        string paymentAction = "no_payment";
+        decimal amountCaptured = 0;
+
+        if (paymentId.HasValue && (paymentStatus == "authorized" || paymentStatus == "escrowed"))
+        {
+            var outcome = new ShortlistOutcome
+            {
+                Status = outcomeStatus,
+                CandidatesDelivered = request.CandidatesDelivered,
+                CandidatesRequested = request.CandidatesRequested,
+                DiscountPercent = discountPercent,
+                FinalAmount = finalAmount
+            };
+
+            var finalizationResult = await _paymentService.FinalizePaymentAsync(shortlistRequestId, outcome);
+
+            if (!finalizationResult.Success)
+            {
+                return new ShortlistDeliveryResult
+                {
+                    Success = false,
+                    ErrorMessage = finalizationResult.ErrorMessage
+                };
+            }
+
+            paymentAction = finalizationResult.Action;
+            amountCaptured = finalizationResult.AmountCaptured;
+        }
+
+        // Mark shortlist as completed
+        await connection.ExecuteAsync(@"
+            UPDATE shortlist_requests
+            SET status = @Status, completed_at = @CompletedAt, final_price = @FinalPrice
+            WHERE id = @ShortlistRequestId",
+            new
+            {
+                Status = (int)ShortlistStatus.Completed,
+                CompletedAt = DateTime.UtcNow,
+                FinalPrice = amountCaptured > 0 ? amountCaptured : (decimal?)null,
+                ShortlistRequestId = shortlistRequestId
+            });
+
+        return new ShortlistDeliveryResult
+        {
+            Success = true,
+            PaymentAction = paymentAction,
+            AmountCaptured = amountCaptured
+        };
     }
 
     private List<string> ParseTechStack(string? techStackJson)

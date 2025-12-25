@@ -7,6 +7,7 @@ using bixo_api.Configuration;
 using bixo_api.Data;
 using bixo_api.Services;
 using bixo_api.Services.Interfaces;
+using bixo_api.Services.Payments;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -30,7 +31,15 @@ builder.Services.AddScoped<ICvParsingService, CvParsingService>();
 builder.Services.AddScoped<IShortlistService, ShortlistService>();
 builder.Services.AddScoped<IMatchingService, MatchingService>();
 builder.Services.AddScoped<IMessageService, MessageService>();
+
+// Payment providers
+builder.Services.AddHttpClient("PayPal");
+builder.Services.AddHttpClient("Solana");
+builder.Services.AddScoped<IPaymentProviderService, StripePaymentProvider>();
+builder.Services.AddScoped<IPaymentProviderService, PayPalPaymentProvider>();
+builder.Services.AddScoped<IPaymentProviderService, UsdcPaymentProvider>();
 builder.Services.AddScoped<IPaymentService, PaymentService>();
+
 builder.Services.AddScoped<INotificationService, NotificationService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 

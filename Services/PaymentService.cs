@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Dapper;
 using Microsoft.Extensions.Options;
 using bixo_api.Configuration;
@@ -5,6 +6,7 @@ using bixo_api.Data;
 using bixo_api.Models.Entities;
 using bixo_api.Models.Enums;
 using bixo_api.Services.Interfaces;
+using bixo_api.Services.Payments;
 using Stripe;
 using Stripe.Checkout;
 
@@ -15,18 +17,375 @@ public class PaymentService : IPaymentService
     private readonly IDbConnectionFactory _db;
     private readonly StripeSettings _settings;
     private readonly ILogger<PaymentService> _logger;
+    private readonly Dictionary<string, IPaymentProviderService> _providers;
 
     public PaymentService(
         IDbConnectionFactory db,
         IOptions<StripeSettings> settings,
-        ILogger<PaymentService> logger)
+        ILogger<PaymentService> logger,
+        IEnumerable<IPaymentProviderService> providers)
     {
         _db = db;
         _settings = settings.Value;
         _logger = logger;
+        _providers = providers.ToDictionary(p => p.ProviderName, p => p);
 
         StripeConfiguration.ApiKey = _settings.SecretKey;
     }
+
+    // === New Authorization Flow Methods ===
+
+    public async Task<PaymentInitiationResult> InitiatePaymentAsync(PaymentInitiationRequest request)
+    {
+        using var connection = _db.CreateConnection();
+
+        // Get company info
+        var company = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT c.id, c.stripe_customer_id, u.email
+            FROM companies c
+            JOIN users u ON u.id = c.user_id
+            WHERE c.id = @CompanyId",
+            new { request.CompanyId });
+
+        if (company == null)
+        {
+            return new PaymentInitiationResult
+            {
+                Success = false,
+                ErrorMessage = "Company not found"
+            };
+        }
+
+        // Get provider
+        if (!_providers.TryGetValue(request.Provider.ToLower(), out var provider))
+        {
+            return new PaymentInitiationResult
+            {
+                Success = false,
+                ErrorMessage = $"Unknown payment provider: {request.Provider}"
+            };
+        }
+
+        // Create payment record
+        var paymentId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+
+        await connection.ExecuteAsync(@"
+            INSERT INTO payments (id, company_id, shortlist_request_id, provider, provider_reference,
+                                  amount_authorized, amount_captured, currency, status, created_at, updated_at)
+            VALUES (@Id, @CompanyId, @ShortlistRequestId, @Provider, @ProviderReference,
+                    @AmountAuthorized, 0, @Currency, @Status, @CreatedAt, @UpdatedAt)",
+            new
+            {
+                Id = paymentId,
+                request.CompanyId,
+                request.ShortlistRequestId,
+                Provider = request.Provider.ToLower(),
+                ProviderReference = "pending",
+                AmountAuthorized = request.Amount,
+                request.Currency,
+                Status = "initiated",
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+
+        // Link payment to shortlist request
+        await connection.ExecuteAsync(@"
+            UPDATE shortlist_requests SET payment_id = @PaymentId WHERE id = @ShortlistRequestId",
+            new { PaymentId = paymentId, request.ShortlistRequestId });
+
+        // Log audit entry
+        await LogPaymentAuditAsync(connection, paymentId, null, "initiated", "payment_initiated", null);
+
+        // Authorize with provider
+        var authRequest = new PaymentAuthorizationRequest
+        {
+            CompanyId = request.CompanyId,
+            ShortlistRequestId = request.ShortlistRequestId,
+            Amount = request.Amount,
+            Currency = request.Currency,
+            CustomerEmail = (string?)company.email,
+            CustomerId = company.stripe_customer_id as string,
+            Description = request.Description
+        };
+
+        var authResult = await provider.AuthorizeAsync(authRequest);
+
+        if (!authResult.Success)
+        {
+            // Update payment status to failed
+            await connection.ExecuteAsync(@"
+                UPDATE payments SET status = 'failed', error_message = @ErrorMessage, updated_at = @UpdatedAt
+                WHERE id = @PaymentId",
+                new { ErrorMessage = authResult.ErrorMessage, UpdatedAt = DateTime.UtcNow, PaymentId = paymentId });
+
+            await LogPaymentAuditAsync(connection, paymentId, "initiated", "failed", "authorization_failed",
+                new { authResult.ErrorMessage, authResult.ErrorCode });
+
+            return new PaymentInitiationResult
+            {
+                Success = false,
+                PaymentId = paymentId,
+                ErrorMessage = authResult.ErrorMessage
+            };
+        }
+
+        // Update payment with provider reference
+        await connection.ExecuteAsync(@"
+            UPDATE payments SET provider_reference = @ProviderReference, updated_at = @UpdatedAt
+            WHERE id = @PaymentId",
+            new { authResult.ProviderReference, UpdatedAt = DateTime.UtcNow, PaymentId = paymentId });
+
+        return new PaymentInitiationResult
+        {
+            Success = true,
+            PaymentId = paymentId,
+            ClientSecret = authResult.ClientSecret,
+            ApprovalUrl = authResult.ApprovalUrl,
+            EscrowAddress = authResult.EscrowAddress
+        };
+    }
+
+    public async Task<bool> ConfirmAuthorizationAsync(Guid paymentId, string? providerReference = null)
+    {
+        using var connection = _db.CreateConnection();
+
+        var payment = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT id, provider, provider_reference, status FROM payments WHERE id = @PaymentId",
+            new { PaymentId = paymentId });
+
+        if (payment == null)
+        {
+            _logger.LogWarning("Payment not found for confirmation: {PaymentId}", paymentId);
+            return false;
+        }
+
+        var currentStatus = (string)payment.status;
+        if (currentStatus != "initiated")
+        {
+            _logger.LogWarning("Payment {PaymentId} already in status {Status}", paymentId, currentStatus);
+            return currentStatus == "authorized" || currentStatus == "escrowed";
+        }
+
+        var provider = (string)payment.provider;
+        var newStatus = provider == "usdc" ? "escrowed" : "authorized";
+
+        // Update provider reference if provided
+        if (!string.IsNullOrEmpty(providerReference))
+        {
+            await connection.ExecuteAsync(@"
+                UPDATE payments SET provider_reference = @ProviderReference, updated_at = @UpdatedAt
+                WHERE id = @PaymentId",
+                new { ProviderReference = providerReference, UpdatedAt = DateTime.UtcNow, PaymentId = paymentId });
+        }
+
+        // Update status
+        await connection.ExecuteAsync(@"
+            UPDATE payments SET status = @Status, updated_at = @UpdatedAt WHERE id = @PaymentId",
+            new { Status = newStatus, UpdatedAt = DateTime.UtcNow, PaymentId = paymentId });
+
+        await LogPaymentAuditAsync(connection, paymentId, currentStatus, newStatus, "authorization_confirmed", null);
+
+        _logger.LogInformation("Payment {PaymentId} confirmed with status {Status}", paymentId, newStatus);
+        return true;
+    }
+
+    public async Task<PaymentFinalizationResult> FinalizePaymentAsync(Guid shortlistRequestId, ShortlistOutcome outcome)
+    {
+        using var connection = _db.CreateConnection();
+
+        var payment = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT p.id, p.provider, p.provider_reference, p.amount_authorized, p.status
+            FROM payments p
+            JOIN shortlist_requests sr ON sr.payment_id = p.id
+            WHERE sr.id = @ShortlistRequestId",
+            new { ShortlistRequestId = shortlistRequestId });
+
+        if (payment == null)
+        {
+            return new PaymentFinalizationResult
+            {
+                Success = false,
+                ErrorMessage = "Payment not found for shortlist"
+            };
+        }
+
+        var currentStatus = (string)payment.status;
+        if (currentStatus != "authorized" && currentStatus != "escrowed")
+        {
+            return new PaymentFinalizationResult
+            {
+                Success = false,
+                ErrorMessage = $"Payment cannot be finalized from status: {currentStatus}"
+            };
+        }
+
+        var providerName = (string)payment.provider;
+        if (!_providers.TryGetValue(providerName, out var provider))
+        {
+            return new PaymentFinalizationResult
+            {
+                Success = false,
+                ErrorMessage = $"Payment provider not found: {providerName}"
+            };
+        }
+
+        var paymentId = (Guid)payment.id;
+        var providerReference = (string)payment.provider_reference;
+        var amountAuthorized = (decimal)payment.amount_authorized;
+
+        string action;
+        string newStatus;
+        decimal amountCaptured = 0;
+        string? pricingType;
+        decimal? finalPrice;
+
+        switch (outcome.Status.ToLower())
+        {
+            case "fulfilled":
+                // Full capture
+                var captureResult = await provider.CaptureFullAsync(providerReference, amountAuthorized);
+                if (!captureResult.Success)
+                {
+                    await LogPaymentAuditAsync(connection, paymentId, currentStatus, "failed", "capture_failed",
+                        new { captureResult.ErrorMessage });
+                    return new PaymentFinalizationResult
+                    {
+                        Success = false,
+                        ErrorMessage = captureResult.ErrorMessage
+                    };
+                }
+                action = "captured";
+                newStatus = "captured";
+                amountCaptured = captureResult.AmountCaptured;
+                pricingType = "full";
+                finalPrice = amountCaptured;
+                break;
+
+            case "partial":
+                // Partial capture
+                var finalAmount = outcome.FinalAmount ?? (amountAuthorized * (1 - (outcome.DiscountPercent ?? 0) / 100));
+                var partialResult = await provider.CapturePartialAsync(providerReference, amountAuthorized, finalAmount);
+                if (!partialResult.Success)
+                {
+                    await LogPaymentAuditAsync(connection, paymentId, currentStatus, "failed", "partial_capture_failed",
+                        new { partialResult.ErrorMessage });
+                    return new PaymentFinalizationResult
+                    {
+                        Success = false,
+                        ErrorMessage = partialResult.ErrorMessage
+                    };
+                }
+                action = "partial";
+                newStatus = "partial";
+                amountCaptured = partialResult.AmountCaptured;
+                pricingType = "partial";
+                finalPrice = amountCaptured;
+                break;
+
+            case "no_match":
+                // Release authorization
+                var releaseResult = await provider.ReleaseAsync(providerReference);
+                if (!releaseResult.Success)
+                {
+                    await LogPaymentAuditAsync(connection, paymentId, currentStatus, "failed", "release_failed",
+                        new { releaseResult.ErrorMessage });
+                    return new PaymentFinalizationResult
+                    {
+                        Success = false,
+                        ErrorMessage = releaseResult.ErrorMessage
+                    };
+                }
+                action = "released";
+                newStatus = "released";
+                amountCaptured = 0;
+                pricingType = "free";
+                finalPrice = 0;
+                break;
+
+            default:
+                return new PaymentFinalizationResult
+                {
+                    Success = false,
+                    ErrorMessage = $"Unknown outcome status: {outcome.Status}"
+                };
+        }
+
+        // Update payment record
+        await connection.ExecuteAsync(@"
+            UPDATE payments SET status = @Status, amount_captured = @AmountCaptured, updated_at = @UpdatedAt
+            WHERE id = @PaymentId",
+            new { Status = newStatus, AmountCaptured = amountCaptured, UpdatedAt = DateTime.UtcNow, PaymentId = paymentId });
+
+        // Update shortlist request
+        await connection.ExecuteAsync(@"
+            UPDATE shortlist_requests SET pricing_type = @PricingType, final_price = @FinalPrice
+            WHERE id = @ShortlistRequestId",
+            new { PricingType = pricingType, FinalPrice = finalPrice, ShortlistRequestId = shortlistRequestId });
+
+        await LogPaymentAuditAsync(connection, paymentId, currentStatus, newStatus, $"payment_{action}",
+            new { outcome.Status, amountCaptured, outcome.CandidatesDelivered });
+
+        _logger.LogInformation(
+            "Payment {PaymentId} finalized: {Action} with amount {Amount}",
+            paymentId, action, amountCaptured);
+
+        return new PaymentFinalizationResult
+        {
+            Success = true,
+            Action = action,
+            AmountCaptured = amountCaptured
+        };
+    }
+
+    public async Task<PaymentStatusResponse?> GetPaymentStatusAsync(Guid shortlistRequestId)
+    {
+        using var connection = _db.CreateConnection();
+
+        var payment = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT p.id, p.provider, p.status, p.amount_authorized, p.amount_captured, p.created_at
+            FROM payments p
+            JOIN shortlist_requests sr ON sr.payment_id = p.id
+            WHERE sr.id = @ShortlistRequestId",
+            new { ShortlistRequestId = shortlistRequestId });
+
+        if (payment == null) return null;
+
+        return new PaymentStatusResponse
+        {
+            PaymentId = (Guid)payment.id,
+            Provider = (string)payment.provider,
+            Status = (string)payment.status,
+            AmountAuthorized = (decimal)payment.amount_authorized,
+            AmountCaptured = (decimal)payment.amount_captured,
+            CreatedAt = (DateTime)payment.created_at
+        };
+    }
+
+    private async Task LogPaymentAuditAsync(
+        System.Data.IDbConnection connection,
+        Guid paymentId,
+        string? previousStatus,
+        string newStatus,
+        string action,
+        object? providerResponse)
+    {
+        await connection.ExecuteAsync(@"
+            INSERT INTO payment_audit_log (id, payment_id, previous_status, new_status, action, provider_response, created_at)
+            VALUES (@Id, @PaymentId, @PreviousStatus, @NewStatus, @Action, @ProviderResponse::jsonb, @CreatedAt)",
+            new
+            {
+                Id = Guid.NewGuid(),
+                PaymentId = paymentId,
+                PreviousStatus = previousStatus,
+                NewStatus = newStatus,
+                Action = action,
+                ProviderResponse = providerResponse != null ? JsonSerializer.Serialize(providerResponse) : null,
+                CreatedAt = DateTime.UtcNow
+            });
+    }
+
+    // === Legacy Methods ===
 
     public async Task<string> CreateShortlistPaymentSessionAsync(Guid companyId, Guid shortlistId, Guid pricingId)
     {
@@ -343,7 +702,7 @@ public class PaymentService : IPaymentService
                             Amount = (decimal)pricing.price,
                             Currency = "USD",
                             StripePaymentIntentId = session.PaymentIntentId,
-                            Status = (int)PaymentStatus.Completed,
+                            Status = (int)PaymentStatus.Captured,
                             CreatedAt = DateTime.UtcNow
                         });
                 }
@@ -393,7 +752,7 @@ public class PaymentService : IPaymentService
                             Amount = yearly ? (decimal)plan.yearly_price : (decimal)plan.monthly_price,
                             Currency = "USD",
                             StripeSubscriptionId = session.SubscriptionId,
-                            Status = (int)PaymentStatus.Completed,
+                            Status = (int)PaymentStatus.Captured,
                             CreatedAt = DateTime.UtcNow
                         });
                 }

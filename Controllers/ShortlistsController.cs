@@ -71,6 +71,7 @@ public class ShortlistsController : ControllerBase
     }
 
     [HttpPost("{id}/pay")]
+    [Obsolete("Use /payment/initiate for new payment flow")]
     public async Task<ActionResult<ApiResponse<PaymentSessionResponse>>> PayForShortlist(Guid id, [FromBody] PayForShortlistRequest request)
     {
         try
@@ -82,6 +83,156 @@ public class ShortlistsController : ControllerBase
         {
             return BadRequest(ApiResponse<PaymentSessionResponse>.Fail(ex.Message));
         }
+    }
+
+    /// <summary>
+    /// Get price estimate for a shortlist before initiating payment
+    /// </summary>
+    [HttpGet("{id}/payment/estimate")]
+    public async Task<ActionResult<ApiResponse<ShortlistPriceEstimate>>> GetPaymentEstimate(Guid id)
+    {
+        // Verify shortlist belongs to company
+        using var connection = _db.CreateConnection();
+        var exists = await connection.ExecuteScalarAsync<bool>(@"
+            SELECT EXISTS(SELECT 1 FROM shortlist_requests WHERE id = @Id AND company_id = @CompanyId)",
+            new { Id = id, CompanyId = GetCompanyId() });
+
+        if (!exists)
+        {
+            return NotFound(ApiResponse<ShortlistPriceEstimate>.Fail("Shortlist not found"));
+        }
+
+        var estimate = await _shortlistService.GetPriceEstimateAsync(id);
+        return Ok(ApiResponse<ShortlistPriceEstimate>.Ok(estimate));
+    }
+
+    /// <summary>
+    /// Initiate payment authorization for a shortlist (authorize/escrow funds)
+    /// </summary>
+    [HttpPost("{id}/payment/initiate")]
+    public async Task<ActionResult<ApiResponse<PaymentInitiationResponse>>> InitiatePayment(Guid id, [FromBody] InitiatePaymentRequest request)
+    {
+        var companyId = GetCompanyId();
+
+        // Verify shortlist belongs to company
+        using var connection = _db.CreateConnection();
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT id, payment_id FROM shortlist_requests
+            WHERE id = @Id AND company_id = @CompanyId",
+            new { Id = id, CompanyId = companyId });
+
+        if (shortlist == null)
+        {
+            return NotFound(ApiResponse<PaymentInitiationResponse>.Fail("Shortlist not found"));
+        }
+
+        // Check if payment already exists
+        if (shortlist.payment_id != null)
+        {
+            var existingStatus = await _paymentService.GetPaymentStatusAsync(id);
+            if (existingStatus != null && existingStatus.Status != "failed")
+            {
+                return BadRequest(ApiResponse<PaymentInitiationResponse>.Fail("Payment already initiated for this shortlist"));
+            }
+        }
+
+        // Get price estimate
+        var estimate = await _shortlistService.GetPriceEstimateAsync(id);
+
+        var initiationRequest = new PaymentInitiationRequest
+        {
+            CompanyId = companyId,
+            ShortlistRequestId = id,
+            Amount = request.Amount ?? estimate.FinalPrice,
+            Currency = request.Currency ?? "USD",
+            Provider = request.Provider ?? "stripe",
+            Description = $"Shortlist payment for request {id}"
+        };
+
+        var result = await _paymentService.InitiatePaymentAsync(initiationRequest);
+
+        if (!result.Success)
+        {
+            return BadRequest(ApiResponse<PaymentInitiationResponse>.Fail(result.ErrorMessage ?? "Payment initiation failed"));
+        }
+
+        var response = new PaymentInitiationResponse
+        {
+            PaymentId = result.PaymentId!.Value,
+            ClientSecret = result.ClientSecret,
+            ApprovalUrl = result.ApprovalUrl,
+            EscrowAddress = result.EscrowAddress,
+            Provider = request.Provider ?? "stripe"
+        };
+
+        return Ok(ApiResponse<PaymentInitiationResponse>.Ok(response, "Payment initiated"));
+    }
+
+    /// <summary>
+    /// Confirm payment authorization after customer approval
+    /// </summary>
+    [HttpPost("{id}/payment/confirm")]
+    public async Task<ActionResult<ApiResponse>> ConfirmPayment(Guid id, [FromBody] ConfirmPaymentRequest? request = null)
+    {
+        var companyId = GetCompanyId();
+
+        // Verify shortlist belongs to company and get payment
+        using var connection = _db.CreateConnection();
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT sr.id, sr.payment_id, p.status
+            FROM shortlist_requests sr
+            LEFT JOIN payments p ON p.id = sr.payment_id
+            WHERE sr.id = @Id AND sr.company_id = @CompanyId",
+            new { Id = id, CompanyId = companyId });
+
+        if (shortlist == null)
+        {
+            return NotFound(ApiResponse.Fail("Shortlist not found"));
+        }
+
+        var paymentId = shortlist.payment_id as Guid?;
+        if (!paymentId.HasValue)
+        {
+            return BadRequest(ApiResponse.Fail("No payment found for this shortlist"));
+        }
+
+        var confirmed = await _paymentService.ConfirmAuthorizationAsync(paymentId.Value, request?.ProviderReference);
+
+        if (!confirmed)
+        {
+            return BadRequest(ApiResponse.Fail("Failed to confirm payment authorization"));
+        }
+
+        return Ok(ApiResponse.Ok("Payment authorization confirmed"));
+    }
+
+    /// <summary>
+    /// Get payment status for a shortlist
+    /// </summary>
+    [HttpGet("{id}/payment/status")]
+    public async Task<ActionResult<ApiResponse<PaymentStatusResponse>>> GetPaymentStatus(Guid id)
+    {
+        var companyId = GetCompanyId();
+
+        // Verify shortlist belongs to company
+        using var connection = _db.CreateConnection();
+        var exists = await connection.ExecuteScalarAsync<bool>(@"
+            SELECT EXISTS(SELECT 1 FROM shortlist_requests WHERE id = @Id AND company_id = @CompanyId)",
+            new { Id = id, CompanyId = companyId });
+
+        if (!exists)
+        {
+            return NotFound(ApiResponse<PaymentStatusResponse>.Fail("Shortlist not found"));
+        }
+
+        var status = await _paymentService.GetPaymentStatusAsync(id);
+
+        if (status == null)
+        {
+            return NotFound(ApiResponse<PaymentStatusResponse>.Fail("No payment found for this shortlist"));
+        }
+
+        return Ok(ApiResponse<PaymentStatusResponse>.Ok(status));
     }
 
     [HttpPost("{id}/messages")]
@@ -247,4 +398,25 @@ public class SendShortlistMessagesResponse
 {
     public int MessagesSent { get; set; }
     public Guid ShortlistId { get; set; }
+}
+
+public class InitiatePaymentRequest
+{
+    public decimal? Amount { get; set; }
+    public string? Currency { get; set; }
+    public string? Provider { get; set; } // stripe | paypal | usdc
+}
+
+public class PaymentInitiationResponse
+{
+    public Guid PaymentId { get; set; }
+    public string? ClientSecret { get; set; } // For Stripe frontend
+    public string? ApprovalUrl { get; set; } // For PayPal redirect
+    public string? EscrowAddress { get; set; } // For USDC transfer
+    public string Provider { get; set; } = string.Empty;
+}
+
+public class ConfirmPaymentRequest
+{
+    public string? ProviderReference { get; set; }
 }
