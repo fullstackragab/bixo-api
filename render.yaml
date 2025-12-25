@@ -1,0 +1,61 @@
+# Render.com Blueprint
+# https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: bixo-api
+    runtime: docker
+    plan: starter  # $7/month, upgrade as needed
+    healthCheckPath: /api/health
+    envVars:
+      # Database (use Render PostgreSQL or external)
+      - key: ConnectionStrings__DefaultConnection
+        sync: false  # Set manually or link to Render PostgreSQL
+
+      # JWT Authentication
+      - key: Jwt__Secret
+        generateValue: true  # Auto-generate 32-char secret
+      - key: Jwt__Issuer
+        value: bixo-api
+      - key: Jwt__Audience
+        value: bixo-web
+
+      # CORS - Update with your frontend URL
+      - key: Cors__AllowedOrigins__0
+        sync: false
+
+      # AWS S3 (for CV storage)
+      - key: AWS__BucketName
+        sync: false
+      - key: AWS__Region
+        sync: false
+      - key: AWS__AccessKeyId
+        sync: false
+      - key: AWS__SecretAccessKey
+        sync: false
+
+      # OpenAI (for CV parsing)
+      - key: OpenAI__ApiKey
+        sync: false
+
+      # Stripe (for payments)
+      - key: Stripe__SecretKey
+        sync: false
+      - key: Stripe__PublishableKey
+        sync: false
+      - key: Stripe__WebhookSecret
+        sync: false
+
+      # SendGrid (for emails)
+      - key: Email__ApiKey
+        sync: false
+      - key: Email__FromEmail
+        value: support@bixo.io
+      - key: Email__FromName
+        value: Bixo
+
+databases:
+  - name: bixo-db
+    plan: starter  # $7/month
+    databaseName: bixo
+    user: bixo
