@@ -28,8 +28,8 @@ public interface IShortlistService
     Task<ScopeProposalResult> ProposeScopeAsync(Guid shortlistRequestId, ScopeProposalRequest request);
 
     /// <summary>
-    /// Company approves pricing (status: PricingPending → PricingApproved).
-    /// Does NOT trigger payment authorization.
+    /// Company approves pricing (status: PricingPending → Approved).
+    /// Ready for delivery after approval.
     /// </summary>
     Task ApprovePricingAsync(Guid companyId, Guid shortlistRequestId);
 
@@ -40,14 +40,32 @@ public interface IShortlistService
     Task DeclinePricingAsync(Guid companyId, Guid shortlistRequestId, string? reason);
 
     /// <summary>
-    /// Authorize payment after pricing approval (status: PricingApproved → Authorized).
-    /// </summary>
-    Task<PaymentAuthorizationResult> AuthorizePaymentAsync(Guid companyId, Guid shortlistRequestId, string provider);
-
-    /// <summary>
     /// Get shortlists with pending pricing for a company.
     /// </summary>
     Task<List<ScopeProposalResponse>> GetPendingScopeProposalsAsync(Guid companyId);
+
+    // === Manual Payment Settlement ===
+
+    /// <summary>
+    /// Admin marks shortlist as paid (sets paymentStatus = paid).
+    /// Allowed only when status = Delivered.
+    /// </summary>
+    Task MarkAsPaidAsync(Guid shortlistRequestId, Guid adminUserId, string? paymentNote);
+
+    /// <summary>
+    /// Complete shortlist after delivery and payment confirmed.
+    /// Called automatically or manually when status=Delivered AND paymentStatus=Paid.
+    /// </summary>
+    Task CompleteShortlistAsync(Guid shortlistRequestId);
+
+    // === Legacy/Future Stripe Support ===
+
+    /// <summary>
+    /// [DEPRECATED - for future Stripe automation]
+    /// Authorize payment after pricing approval.
+    /// </summary>
+    [Obsolete("Use manual payment flow for now. Stripe automation coming later.")]
+    Task<PaymentAuthorizationResult> AuthorizePaymentAsync(Guid companyId, Guid shortlistRequestId, string provider);
 
     // Legacy method - kept for compatibility during migration
     Task<ScopeApprovalResult> ApproveScopeAsync(Guid companyId, Guid shortlistRequestId, ScopeApprovalRequest request);
@@ -65,6 +83,9 @@ public class ShortlistPriceEstimate
 
 public class ShortlistDeliveryRequest
 {
+    /// <summary>Admin user who is delivering the shortlist</summary>
+    public Guid AdminUserId { get; set; }
+
     public int CandidatesRequested { get; set; }
     public int CandidatesDelivered { get; set; }
     public decimal? OverridePrice { get; set; }

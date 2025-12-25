@@ -356,8 +356,19 @@ public class ShortlistService : IShortlistService
             new { ShortlistId = shortlistId });
 
         var status = (ShortlistStatus)shortlist.status;
-        var filteredCandidates = candidates
-            .Where(c => (bool)c.admin_approved || status == ShortlistStatus.Delivered);
+
+        // Only show candidates after delivery, and only approved ones
+        IEnumerable<dynamic> filteredCandidates;
+        if (status == ShortlistStatus.Delivered || status == ShortlistStatus.Completed)
+        {
+            // After delivery: only show admin-approved candidates
+            filteredCandidates = candidates.Where(c => (bool)c.admin_approved);
+        }
+        else
+        {
+            // Before delivery: don't expose any candidates to company
+            filteredCandidates = Enumerable.Empty<dynamic>();
+        }
 
         var candidatesList = new List<ShortlistCandidateResponse>();
         int newCandidatesCount = 0;
@@ -674,12 +685,11 @@ public class ShortlistService : IShortlistService
     {
         using var connection = _db.CreateConnection();
 
-        // Verify shortlist exists and has payment
+        // Verify shortlist exists and is approved
         var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
-            SELECT sr.id, sr.status, sr.payment_id, sr.role_title, sr.company_id, p.status as payment_status, p.amount_authorized,
+            SELECT sr.id, sr.status, sr.role_title, sr.company_id, sr.price_amount, sr.proposed_price,
                    u.email as company_email
             FROM shortlist_requests sr
-            LEFT JOIN payments p ON p.id = sr.payment_id
             LEFT JOIN companies c ON c.id = sr.company_id
             LEFT JOIN users u ON u.id = c.user_id
             WHERE sr.id = @ShortlistRequestId",
@@ -694,127 +704,38 @@ public class ShortlistService : IShortlistService
             };
         }
 
-        var paymentId = shortlist.payment_id as Guid?;
-        var paymentStatus = shortlist.payment_status as string;
-
-        // Determine outcome
-        string outcomeStatus;
-        decimal? discountPercent = null;
-        decimal? finalAmount = request.OverridePrice;
-
-        if (request.CandidatesDelivered == 0)
+        var currentStatus = (ShortlistStatus)(int)shortlist.status;
+        if (currentStatus != ShortlistStatus.Approved)
         {
-            outcomeStatus = "no_match";
-        }
-        else if (request.CandidatesDelivered >= request.CandidatesRequested)
-        {
-            outcomeStatus = "fulfilled";
-        }
-        else
-        {
-            outcomeStatus = "partial";
-            // Calculate partial discount based on delivery ratio
-            if (!finalAmount.HasValue)
+            return new ShortlistDeliveryResult
             {
-                var deliveryRatio = (decimal)request.CandidatesDelivered / request.CandidatesRequested;
-                discountPercent = (1 - deliveryRatio) * 100;
-            }
+                Success = false,
+                ErrorMessage = $"Cannot deliver: shortlist must be in Approved status (current: {currentStatus})"
+            };
         }
 
-        // Step 1: Mark shortlist as Delivered (candidates now visible to company)
+        // Mark shortlist as Delivered (candidates now visible to company)
+        // Payment settlement happens out-of-band (manual), status stays pending
         var now = DateTime.UtcNow;
         await connection.ExecuteAsync(@"
             UPDATE shortlist_requests
-            SET status = @Status, delivered_at = @DeliveredAt
+            SET status = @Status,
+                delivered_at = @DeliveredAt,
+                delivered_by = @DeliveredBy,
+                payment_status = @PaymentStatus
             WHERE id = @ShortlistRequestId",
             new
             {
                 Status = (int)ShortlistStatus.Delivered,
                 DeliveredAt = now,
+                DeliveredBy = request.AdminUserId,
+                PaymentStatus = (int)PaymentSettlementStatus.Pending,
                 ShortlistRequestId = shortlistRequestId
             });
 
-        _logger.LogInformation("Shortlist {ShortlistId} delivered at {DeliveredAt}", shortlistRequestId, now);
-
-        // Step 2: Capture payment AFTER delivery
-        string paymentAction = "no_payment";
-        decimal amountCaptured = 0;
-
-        if (paymentId.HasValue && paymentStatus == "authorized")
-        {
-            var outcome = new ShortlistOutcome
-            {
-                Status = outcomeStatus,
-                CandidatesDelivered = request.CandidatesDelivered,
-                CandidatesRequested = request.CandidatesRequested,
-                DiscountPercent = discountPercent,
-                FinalAmount = finalAmount
-            };
-
-            var finalizationResult = await _paymentService.FinalizePaymentAsync(shortlistRequestId, outcome);
-
-            if (!finalizationResult.Success)
-            {
-                // CRITICAL: Delivery succeeded but capture failed
-                // Lock candidate visibility and flag for manual resolution
-                _logger.LogError(
-                    "Payment capture failed for shortlist {ShortlistId} after delivery. Manual resolution required. Error: {Error}",
-                    shortlistRequestId, finalizationResult.ErrorMessage);
-
-                // Mark shortlist with capture failure - do NOT change delivered status
-                await connection.ExecuteAsync(@"
-                    UPDATE shortlist_requests
-                    SET cancellation_reason = @Reason
-                    WHERE id = @ShortlistRequestId",
-                    new
-                    {
-                        Reason = $"CAPTURE_FAILED: {finalizationResult.ErrorMessage}",
-                        ShortlistRequestId = shortlistRequestId
-                    });
-
-                return new ShortlistDeliveryResult
-                {
-                    Success = true, // Delivery succeeded
-                    PaymentAction = "capture_failed",
-                    AmountCaptured = 0,
-                    ErrorMessage = $"Shortlist delivered but payment capture failed: {finalizationResult.ErrorMessage}"
-                };
-            }
-
-            paymentAction = finalizationResult.Action;
-            amountCaptured = finalizationResult.AmountCaptured;
-
-            // Step 3: Mark as Completed after successful capture
-            await connection.ExecuteAsync(@"
-                UPDATE shortlist_requests
-                SET status = @Status, completed_at = @CompletedAt, final_price = @FinalPrice
-                WHERE id = @ShortlistRequestId",
-                new
-                {
-                    Status = (int)ShortlistStatus.Completed,
-                    CompletedAt = DateTime.UtcNow,
-                    FinalPrice = amountCaptured,
-                    ShortlistRequestId = shortlistRequestId
-                });
-
-            _logger.LogInformation(
-                "Payment captured for shortlist {ShortlistId}. Action: {Action}, Amount: {Amount}",
-                shortlistRequestId, paymentAction, amountCaptured);
-        }
-        else if (!paymentId.HasValue)
-        {
-            // No payment associated - mark as completed directly
-            await connection.ExecuteAsync(@"
-                UPDATE shortlist_requests
-                SET status = @Status, completed_at = @CompletedAt
-                WHERE id = @ShortlistRequestId",
-                new
-                {
-                    Status = (int)ShortlistStatus.Completed,
-                    CompletedAt = DateTime.UtcNow,
-                    ShortlistRequestId = shortlistRequestId
-                });
-        }
+        _logger.LogInformation(
+            "Shortlist {ShortlistId} delivered at {DeliveredAt} by admin {AdminId}. Payment pending.",
+            shortlistRequestId, now, request.AdminUserId);
 
         // Send shortlist delivered email to company (fire and forget)
         var companyEmail = shortlist.company_email as string;
@@ -837,9 +758,118 @@ public class ShortlistService : IShortlistService
         return new ShortlistDeliveryResult
         {
             Success = true,
-            PaymentAction = paymentAction,
-            AmountCaptured = amountCaptured
+            PaymentAction = "pending" // Payment is out-of-band, admin will mark as paid later
         };
+    }
+
+    // === Manual Payment Settlement ===
+
+    /// <summary>
+    /// Admin marks shortlist as paid (out-of-band payment received).
+    /// Automatically completes the shortlist if delivered.
+    /// </summary>
+    public async Task MarkAsPaidAsync(Guid shortlistRequestId, Guid adminUserId, string? paymentNote)
+    {
+        using var connection = _db.CreateConnection();
+
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT id, status, payment_status, price_amount, proposed_price
+            FROM shortlist_requests
+            WHERE id = @ShortlistRequestId",
+            new { ShortlistRequestId = shortlistRequestId });
+
+        if (shortlist == null)
+        {
+            throw new InvalidOperationException("Shortlist not found");
+        }
+
+        var currentStatus = (ShortlistStatus)(int)shortlist.status;
+        if (currentStatus != ShortlistStatus.Delivered)
+        {
+            throw new InvalidOperationException($"Cannot mark as paid: shortlist must be Delivered (current: {currentStatus})");
+        }
+
+        var currentPaymentStatus = (PaymentSettlementStatus)(int)shortlist.payment_status;
+        if (currentPaymentStatus == PaymentSettlementStatus.Paid)
+        {
+            throw new InvalidOperationException("Shortlist is already marked as paid");
+        }
+
+        var now = DateTime.UtcNow;
+        decimal finalPrice = (decimal)(shortlist.price_amount ?? shortlist.proposed_price ?? 0m);
+
+        // Mark as paid and complete in one transaction
+        await connection.ExecuteAsync(@"
+            UPDATE shortlist_requests
+            SET payment_status = @PaymentStatus,
+                paid_at = @PaidAt,
+                paid_confirmed_by = @PaidConfirmedBy,
+                payment_note = @PaymentNote,
+                status = @Status,
+                completed_at = @CompletedAt,
+                final_price = @FinalPrice
+            WHERE id = @ShortlistRequestId",
+            new
+            {
+                PaymentStatus = (int)PaymentSettlementStatus.Paid,
+                PaidAt = now,
+                PaidConfirmedBy = adminUserId,
+                PaymentNote = paymentNote,
+                Status = (int)ShortlistStatus.Completed,
+                CompletedAt = now,
+                FinalPrice = finalPrice,
+                ShortlistRequestId = shortlistRequestId
+            });
+
+        _logger.LogInformation(
+            "Shortlist {ShortlistId} marked as paid by admin {AdminId}. Final price: {FinalPrice}. Status: Completed.",
+            shortlistRequestId, adminUserId, finalPrice);
+    }
+
+    /// <summary>
+    /// Complete shortlist (used when status=Delivered AND paymentStatus=Paid).
+    /// Usually called automatically by MarkAsPaidAsync.
+    /// </summary>
+    public async Task CompleteShortlistAsync(Guid shortlistRequestId)
+    {
+        using var connection = _db.CreateConnection();
+
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT id, status, payment_status
+            FROM shortlist_requests
+            WHERE id = @ShortlistRequestId",
+            new { ShortlistRequestId = shortlistRequestId });
+
+        if (shortlist == null)
+        {
+            throw new InvalidOperationException("Shortlist not found");
+        }
+
+        var currentStatus = (ShortlistStatus)(int)shortlist.status;
+        var paymentStatus = (PaymentSettlementStatus)(int)shortlist.payment_status;
+
+        if (currentStatus != ShortlistStatus.Delivered)
+        {
+            throw new InvalidOperationException($"Cannot complete: shortlist must be Delivered (current: {currentStatus})");
+        }
+
+        if (paymentStatus != PaymentSettlementStatus.Paid)
+        {
+            throw new InvalidOperationException($"Cannot complete: payment must be confirmed (current: {paymentStatus})");
+        }
+
+        await connection.ExecuteAsync(@"
+            UPDATE shortlist_requests
+            SET status = @Status, completed_at = @CompletedAt
+            WHERE id = @ShortlistRequestId",
+            new
+            {
+                Status = (int)ShortlistStatus.Completed,
+                CompletedAt = DateTime.UtcNow,
+                ShortlistRequestId = shortlistRequestId
+            });
+
+        _logger.LogInformation("Shortlist {ShortlistId} completed.", shortlistRequestId);
     }
 
     /// <summary>
@@ -996,7 +1026,7 @@ Declining will not affect your visibility for future opportunities.";
             WHERE id = @Id",
             new
             {
-                Status = (int)ShortlistStatus.PricingApproved,
+                Status = (int)ShortlistStatus.Approved,
                 Now = DateTime.UtcNow,
                 PaymentId = paymentResult.PaymentId,
                 Id = shortlistRequestId
@@ -1046,7 +1076,7 @@ Declining will not affect your visibility for future opportunities.";
             WHERE id = @Id",
             new
             {
-                Status = (int)ShortlistStatus.PricingApproved,
+                Status = (int)ShortlistStatus.Approved,
                 Now = DateTime.UtcNow,
                 Id = shortlistRequestId
             });
@@ -1109,7 +1139,7 @@ Declining will not affect your visibility for future opportunities.";
             throw new InvalidOperationException("Shortlist not found");
         }
 
-        if ((int)shortlist.status != (int)ShortlistStatus.PricingApproved)
+        if ((int)shortlist.status != (int)ShortlistStatus.Approved)
         {
             throw new InvalidOperationException($"Cannot authorize payment: pricing must be approved first (current: {(ShortlistStatus)(int)shortlist.status})");
         }

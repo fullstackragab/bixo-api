@@ -1,14 +1,13 @@
 namespace bixo_api.Models.Enums;
 
 /// <summary>
-/// Shortlist lifecycle states following the trust-first, gated monetization flow:
-/// Submitted → Processing → PricingPending → PricingApproved → Authorized → Delivered → Completed
+/// Shortlist business lifecycle states:
+/// Submitted → Processing → PricingPending → Approved → Delivered → Completed
 ///
 /// Rules:
-/// - Admin sets price, cannot trigger payment or delivery
-/// - Company approves pricing before authorization
-/// - Payment authorization before delivery
-/// - Payment capture only after delivery
+/// - Admin sets price, company approves
+/// - Delivery allowed after approval (payment is out-of-band)
+/// - Completion requires: status=Delivered AND paymentStatus=Paid
 /// </summary>
 public enum ShortlistStatus
 {
@@ -21,20 +20,34 @@ public enum ShortlistStatus
     /// <summary>Admin set price, awaiting company approval</summary>
     PricingPending = 2,
 
-    /// <summary>Company approved pricing</summary>
-    PricingApproved = 3,
-
-    /// <summary>Payment authorized, ready for delivery</summary>
-    Authorized = 4,
+    /// <summary>Company approved pricing, ready for delivery</summary>
+    Approved = 3,
 
     /// <summary>Shortlist delivered to company, candidates exposed</summary>
     Delivered = 5,
 
-    /// <summary>Payment captured, flow complete</summary>
+    /// <summary>Delivery complete and payment confirmed</summary>
     Completed = 6,
 
     /// <summary>Cancelled at any stage</summary>
     Cancelled = 7
+}
+
+/// <summary>
+/// Payment settlement status (separate from business lifecycle).
+/// Designed for manual out-of-band payment (PayPal, crypto, bank).
+/// Compatible with future Stripe automation.
+/// </summary>
+public enum PaymentSettlementStatus
+{
+    /// <summary>No payment required for this shortlist</summary>
+    NotRequired = 0,
+
+    /// <summary>Payment pending (default for new shortlists)</summary>
+    Pending = 1,
+
+    /// <summary>Payment confirmed by admin</summary>
+    Paid = 2
 }
 
 /// <summary>
@@ -46,9 +59,8 @@ public static class ShortlistStatusTransitions
     {
         [ShortlistStatus.Submitted] = new() { ShortlistStatus.Processing, ShortlistStatus.PricingPending, ShortlistStatus.Cancelled },
         [ShortlistStatus.Processing] = new() { ShortlistStatus.PricingPending, ShortlistStatus.Cancelled },
-        [ShortlistStatus.PricingPending] = new() { ShortlistStatus.PricingApproved, ShortlistStatus.Processing, ShortlistStatus.Cancelled },
-        [ShortlistStatus.PricingApproved] = new() { ShortlistStatus.Authorized, ShortlistStatus.Cancelled },
-        [ShortlistStatus.Authorized] = new() { ShortlistStatus.Delivered, ShortlistStatus.Cancelled },
+        [ShortlistStatus.PricingPending] = new() { ShortlistStatus.Approved, ShortlistStatus.Processing, ShortlistStatus.Cancelled },
+        [ShortlistStatus.Approved] = new() { ShortlistStatus.Delivered, ShortlistStatus.Cancelled },
         [ShortlistStatus.Delivered] = new() { ShortlistStatus.Completed },
         [ShortlistStatus.Completed] = new(),
         [ShortlistStatus.Cancelled] = new()

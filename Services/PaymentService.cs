@@ -197,9 +197,9 @@ public class PaymentService : IPaymentService
                 WHERE id = @ShortlistId AND status = @PricingApprovedStatus",
                 new
                 {
-                    Status = (int)Models.Enums.ShortlistStatus.Authorized,
+                    Status = (int)Models.Enums.ShortlistStatus.Approved,
                     ShortlistId = shortlistId.Value,
-                    PricingApprovedStatus = (int)Models.Enums.ShortlistStatus.PricingApproved
+                    PricingApprovedStatus = (int)Models.Enums.ShortlistStatus.Approved
                 });
 
             _logger.LogInformation(
@@ -455,7 +455,7 @@ public class PaymentService : IPaymentService
                 WHERE id = @ShortlistId",
                 new
                 {
-                    Status = (int)Models.Enums.ShortlistStatus.PricingApproved,
+                    Status = (int)Models.Enums.ShortlistStatus.Approved,
                     ShortlistId = shortlistId.Value
                 });
 
@@ -952,9 +952,9 @@ public class PaymentService : IPaymentService
                 WHERE id = @ShortlistId AND status = @PricingApprovedStatus",
                 new
                 {
-                    Status = (int)Models.Enums.ShortlistStatus.Authorized,
+                    Status = (int)Models.Enums.ShortlistStatus.Approved,
                     ShortlistId = shortlistId.Value,
-                    PricingApprovedStatus = (int)Models.Enums.ShortlistStatus.PricingApproved
+                    PricingApprovedStatus = (int)Models.Enums.ShortlistStatus.Approved
                 });
         }
 
@@ -1035,9 +1035,9 @@ public class PaymentService : IPaymentService
                 WHERE id = @ShortlistId AND status = @AuthorizedStatus",
                 new
                 {
-                    Status = (int)Models.Enums.ShortlistStatus.PricingApproved,
+                    Status = (int)Models.Enums.ShortlistStatus.Approved,
                     ShortlistId = shortlistId.Value,
-                    AuthorizedStatus = (int)Models.Enums.ShortlistStatus.Authorized
+                    AuthorizedStatus = (int)Models.Enums.ShortlistStatus.Approved
                 });
         }
 

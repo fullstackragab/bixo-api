@@ -32,7 +32,7 @@ public class AdminController : ControllerBase
             TotalCandidates = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM candidates"),
             ActiveCandidates = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM candidates WHERE open_to_opportunities = TRUE"),
             TotalCompanies = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM companies"),
-            PendingShortlists = await connection.ExecuteScalarAsync<int>($"SELECT COUNT(*) FROM shortlist_requests WHERE status IN ({(int)ShortlistStatus.Submitted}, {(int)ShortlistStatus.Processing}, {(int)ShortlistStatus.PricingPending}, {(int)ShortlistStatus.PricingApproved}, {(int)ShortlistStatus.Authorized})"),
+            PendingShortlists = await connection.ExecuteScalarAsync<int>($"SELECT COUNT(*) FROM shortlist_requests WHERE status IN ({(int)ShortlistStatus.Submitted}, {(int)ShortlistStatus.Processing}, {(int)ShortlistStatus.PricingPending}, {(int)ShortlistStatus.Approved})"),
             CompletedShortlists = await connection.ExecuteScalarAsync<int>($"SELECT COUNT(*) FROM shortlist_requests WHERE status = {(int)ShortlistStatus.Delivered}"),
             TotalRevenue = await connection.ExecuteScalarAsync<decimal?>($"SELECT COALESCE(SUM(amount_captured), 0) FROM payments WHERE status = {(int)PaymentStatus.Captured}") ?? 0,
             RecentSignups = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM users WHERE created_at >= @Cutoff", new { Cutoff = DateTime.UtcNow.AddDays(-7) })
@@ -537,6 +537,7 @@ public class AdminController : ControllerBase
 
         var deliveryRequest = new ShortlistDeliveryRequest
         {
+            AdminUserId = GetAdminUserId(),
             CandidatesRequested = request?.CandidatesRequested ?? totalCount,
             CandidatesDelivered = request?.CandidatesDelivered ?? approvedCount,
             OverridePrice = request?.OverridePrice,
@@ -553,11 +554,33 @@ public class AdminController : ControllerBase
         var response = new DeliverShortlistResponse
         {
             PaymentAction = result.PaymentAction,
-            AmountCaptured = result.AmountCaptured,
             CandidatesDelivered = deliveryRequest.CandidatesDelivered
         };
 
-        return Ok(ApiResponse<DeliverShortlistResponse>.Ok(response, "Shortlist delivered"));
+        return Ok(ApiResponse<DeliverShortlistResponse>.Ok(response, "Shortlist delivered. Payment pending."));
+    }
+
+    /// <summary>
+    /// Admin marks shortlist as paid (out-of-band payment received).
+    /// </summary>
+    [HttpPost("shortlists/{id}/mark-paid")]
+    public async Task<ActionResult<ApiResponse>> MarkShortlistAsPaid(Guid id, [FromBody] MarkAsPaidRequest? request = null)
+    {
+        try
+        {
+            await _shortlistService.MarkAsPaidAsync(id, GetAdminUserId(), request?.PaymentNote);
+            return Ok(ApiResponse.Ok("Shortlist marked as paid and completed."));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(ApiResponse.Fail(ex.Message));
+        }
+    }
+
+    private Guid GetAdminUserId()
+    {
+        var userIdClaim = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier);
+        return userIdClaim != null ? Guid.Parse(userIdClaim.Value) : Guid.Empty;
     }
 
     // Support Messages Admin Endpoints
@@ -917,8 +940,13 @@ public class DeliverShortlistRequest
 public class DeliverShortlistResponse
 {
     public string PaymentAction { get; set; } = string.Empty;
-    public decimal AmountCaptured { get; set; }
     public int CandidatesDelivered { get; set; }
+}
+
+public class MarkAsPaidRequest
+{
+    /// <summary>Optional note about the payment (e.g., "PayPal transaction #123")</summary>
+    public string? PaymentNote { get; set; }
 }
 
 public class ProposeScopeRequest
