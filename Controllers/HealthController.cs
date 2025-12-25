@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using bixo_api.Data;
+using System.Data.Common;
 
 namespace bixo_api.Controllers;
 
@@ -20,7 +21,7 @@ public class HealthController : ControllerBase
         try
         {
             // Check database connectivity
-            using var connection = _db.CreateConnection();
+            using var connection = (DbConnection)_db.CreateConnection();
             await connection.OpenAsync();
 
             return Ok(new
