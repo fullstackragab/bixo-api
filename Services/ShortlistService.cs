@@ -92,10 +92,11 @@ public class ShortlistService : IShortlistService
         // If this is a follow-up, calculate pricing
         if (previousRequestId.HasValue)
         {
+            // Allow follow-up from any non-cancelled shortlist
             var previousRequest = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
                 SELECT id, created_at, status FROM shortlist_requests
-                WHERE id = @PreviousRequestId AND company_id = @CompanyId AND status = 2",
-                new { PreviousRequestId = previousRequestId.Value, CompanyId = companyId });
+                WHERE id = @PreviousRequestId AND company_id = @CompanyId AND status != @CancelledStatus",
+                new { PreviousRequestId = previousRequestId.Value, CompanyId = companyId, CancelledStatus = (int)ShortlistStatus.Cancelled });
 
             if (previousRequest != null)
             {
@@ -602,7 +603,8 @@ public class ShortlistService : IShortlistService
     }
 
     /// <summary>
-    /// Get all candidates from the previous shortlist chain (including recursive follow-ups).
+    /// Get all admin-approved candidates from the previous shortlist chain.
+    /// Only approved candidates are excluded because those were actually delivered to the company.
     /// </summary>
     private async Task<HashSet<Guid>> GetPreviousCandidatesAsync(System.Data.IDbConnection connection, Guid previousRequestId)
     {
@@ -612,10 +614,10 @@ public class ShortlistService : IShortlistService
         // Walk through the chain of previous shortlists
         while (currentRequestId != Guid.Empty)
         {
-            // Get candidates from this shortlist
+            // Get only admin-approved candidates (those actually delivered)
             var shortlistCandidates = await connection.QueryAsync<Guid>(@"
                 SELECT candidate_id FROM shortlist_candidates
-                WHERE shortlist_request_id = @RequestId",
+                WHERE shortlist_request_id = @RequestId AND admin_approved = TRUE",
                 new { RequestId = currentRequestId });
 
             foreach (var candidateId in shortlistCandidates)
