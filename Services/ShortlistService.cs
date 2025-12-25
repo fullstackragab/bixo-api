@@ -659,9 +659,12 @@ public class ShortlistService : IShortlistService
 
         // Verify shortlist exists and has payment
         var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
-            SELECT sr.id, sr.status, sr.payment_id, p.status as payment_status, p.amount_authorized
+            SELECT sr.id, sr.status, sr.payment_id, sr.role_title, p.status as payment_status, p.amount_authorized,
+                   u.email as company_email
             FROM shortlist_requests sr
             LEFT JOIN payments p ON p.id = sr.payment_id
+            LEFT JOIN companies c ON c.id = sr.company_id
+            LEFT JOIN users u ON u.id = c.user_id
             WHERE sr.id = @ShortlistRequestId",
             new { ShortlistRequestId = shortlistRequestId });
 
@@ -743,6 +746,20 @@ public class ShortlistService : IShortlistService
                 FinalPrice = amountCaptured > 0 ? amountCaptured : (decimal?)null,
                 ShortlistRequestId = shortlistRequestId
             });
+
+        // Send shortlist delivered email (fire and forget)
+        var companyEmail = shortlist.company_email as string;
+        var roleTitle = shortlist.role_title as string;
+        if (!string.IsNullOrEmpty(companyEmail))
+        {
+            _ = _emailService.SendShortlistDeliveredEmailAsync(new ShortlistDeliveredNotification
+            {
+                Email = companyEmail,
+                RoleTitle = roleTitle ?? "Your role",
+                CandidatesCount = request.CandidatesDelivered,
+                ShortlistId = shortlistRequestId
+            });
+        }
 
         return new ShortlistDeliveryResult
         {

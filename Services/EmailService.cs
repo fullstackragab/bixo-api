@@ -80,13 +80,17 @@ public class EmailService : IEmailService
     {
         try
         {
+            var shortlistFrom = !string.IsNullOrEmpty(_settings.ShortlistFromEmail)
+                ? _settings.ShortlistFromEmail
+                : _settings.FromEmail;
+
             if (string.IsNullOrEmpty(_settings.ApiKey) || string.IsNullOrEmpty(_settings.SupportInboxEmail))
             {
                 _logger.LogWarning("Email settings not configured, skipping shortlist notification email");
                 return;
             }
 
-            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
+            var from = new EmailAddress(shortlistFrom, _settings.FromName);
             var to = new EmailAddress(_settings.SupportInboxEmail);
             var subject = $"[New Shortlist] {notification.RoleTitle} - {notification.CompanyName}";
             var htmlContent = BuildShortlistEmailBody(notification);
@@ -171,6 +175,281 @@ public class EmailService : IEmailService
                 <p><strong>Shortlist ID:</strong> {notification.ShortlistId}</p>
                 <p><strong>Created:</strong> {notification.CreatedAt:yyyy-MM-dd HH:mm:ss} UTC</p>
                 {notes}
+            </body>
+            </html>";
+    }
+
+    public async Task SendCompanyWelcomeEmailAsync(CompanyWelcomeNotification notification)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_settings.ApiKey))
+            {
+                _logger.LogWarning("Email settings not configured, skipping company welcome email");
+                return;
+            }
+
+            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
+            var to = new EmailAddress(notification.Email);
+            var subject = "Welcome to Bixo";
+            var htmlContent = BuildCompanyWelcomeEmailBody();
+
+            var msg = MailHelper.CreateSingleEmail(from, to, subject, null, htmlContent);
+
+            var response = await _client.SendEmailAsync(msg);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("Company welcome email sent to: {Email}", notification.Email);
+            }
+            else
+            {
+                var responseBody = await response.Body.ReadAsStringAsync();
+                _logger.LogError("SendGrid API returned {StatusCode}: {Body}", response.StatusCode, responseBody);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send company welcome email to: {Email}", notification.Email);
+        }
+    }
+
+    private static string BuildCompanyWelcomeEmailBody()
+    {
+        return @"
+            <html>
+            <body style=""font-family: Arial, sans-serif; line-height: 1.8; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;"">
+                <h1 style=""color: #2563eb; margin-bottom: 24px;"">Welcome to Bixo</h1>
+
+                <p>We don't do job posts.</p>
+
+                <p>Instead, we deliver <strong>paid, curated shortlists</strong> — so you can talk to relevant candidates without CV overload.</p>
+
+                <h2 style=""color: #1f2937; margin-top: 32px; font-size: 18px;"">How it works</h2>
+                <ol style=""padding-left: 20px;"">
+                    <li>You request a shortlist for a role</li>
+                    <li>We curate and rank 5–15 relevant candidates</li>
+                    <li>You unlock full profiles only for that shortlist</li>
+                    <li>Messaging is limited to shortlisted candidates only</li>
+                </ol>
+
+                <h2 style=""color: #1f2937; margin-top: 32px; font-size: 18px;"">Pricing &amp; payment</h2>
+                <ul style=""padding-left: 20px;"">
+                    <li>You authorize payment upfront</li>
+                    <li>We only capture <strong>after</strong> the shortlist is delivered</li>
+                    <li>No shortlist = no charge</li>
+                    <li>Partial matches = discounted automatically</li>
+                </ul>
+
+                <h2 style=""color: #1f2937; margin-top: 32px; font-size: 18px;"">Why this works</h2>
+                <ul style=""padding-left: 20px;"">
+                    <li>Candidates know access is paid and intentional</li>
+                    <li>Shortlists are reviewed, not automated dumps</li>
+                    <li>Messaging stays focused and spam-free</li>
+                </ul>
+
+                <p style=""margin-top: 32px;"">When you're ready, request your first shortlist — we'll handle the rest.</p>
+
+                <p style=""margin-top: 32px; color: #6b7280;"">— The Bixo Team</p>
+            </body>
+            </html>";
+    }
+
+    public async Task SendShortlistDeliveredEmailAsync(ShortlistDeliveredNotification notification)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_settings.ApiKey))
+            {
+                _logger.LogWarning("Email settings not configured, skipping shortlist delivered email");
+                return;
+            }
+
+            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
+            var to = new EmailAddress(notification.Email);
+            var subject = $"Your shortlist is ready: {notification.RoleTitle}";
+            var htmlContent = BuildShortlistDeliveredEmailBody();
+
+            var msg = MailHelper.CreateSingleEmail(from, to, subject, null, htmlContent);
+
+            var response = await _client.SendEmailAsync(msg);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("Shortlist delivered email sent to: {Email}", notification.Email);
+            }
+            else
+            {
+                var responseBody = await response.Body.ReadAsStringAsync();
+                _logger.LogError("SendGrid API returned {StatusCode}: {Body}", response.StatusCode, responseBody);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send shortlist delivered email to: {Email}", notification.Email);
+        }
+    }
+
+    private static string BuildShortlistDeliveredEmailBody()
+    {
+        return @"
+            <html>
+            <body style=""font-family: Arial, sans-serif; line-height: 1.8; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;"">
+                <h1 style=""color: #2563eb; margin-bottom: 24px;"">Your shortlist is ready</h1>
+
+                <p>Inside, you'll find:</p>
+
+                <ul style=""padding-left: 20px;"">
+                    <li>A ranked list of curated candidates</li>
+                    <li>Full profiles and CVs</li>
+                    <li>Messaging enabled for this shortlist only</li>
+                </ul>
+
+                <p style=""margin-top: 24px;"">This shortlist is a snapshot in time.<br />
+                If you request a follow-up later, previously delivered candidates will be excluded by default.</p>
+
+                <p style=""margin-top: 24px;"">Payment will only be captured once the shortlist is confirmed as delivered.</p>
+
+                <p style=""margin-top: 24px;"">If you need adjustments or a follow-up request, just let us know.</p>
+
+                <p style=""margin-top: 32px; color: #6b7280;"">— Bixo</p>
+            </body>
+            </html>";
+    }
+
+    public async Task SendCandidateWelcomeEmailAsync(CandidateWelcomeNotification notification)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_settings.ApiKey))
+            {
+                _logger.LogWarning("Email settings not configured, skipping candidate welcome email");
+                return;
+            }
+
+            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
+            var to = new EmailAddress(notification.Email);
+            var subject = "Welcome to Bixo";
+            var htmlContent = BuildCandidateWelcomeEmailBody();
+
+            var msg = MailHelper.CreateSingleEmail(from, to, subject, null, htmlContent);
+
+            var response = await _client.SendEmailAsync(msg);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("Candidate welcome email sent to: {Email}", notification.Email);
+            }
+            else
+            {
+                var responseBody = await response.Body.ReadAsStringAsync();
+                _logger.LogError("SendGrid API returned {StatusCode}: {Body}", response.StatusCode, responseBody);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send candidate welcome email to: {Email}", notification.Email);
+        }
+    }
+
+    private static string BuildCandidateWelcomeEmailBody()
+    {
+        return @"
+            <html>
+            <body style=""font-family: Arial, sans-serif; line-height: 1.8; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;"">
+                <h1 style=""color: #2563eb; margin-bottom: 24px;"">Thanks for joining Bixo</h1>
+
+                <p>Bixo works differently from traditional job platforms.</p>
+
+                <p>You won't apply for jobs here.<br />
+                You won't write cover letters.<br />
+                You won't get spammed.</p>
+
+                <p style=""margin-top: 24px;"">Instead:</p>
+
+                <ul style=""padding-left: 20px;"">
+                    <li>Companies request <strong>paid, curated shortlists</strong></li>
+                    <li>Only shortlisted candidates can be contacted</li>
+                    <li>Messaging is limited, intentional, and role-specific</li>
+                </ul>
+
+                <h2 style=""color: #1f2937; margin-top: 32px; font-size: 18px;"">What to do next</h2>
+                <ol style=""padding-left: 20px;"">
+                    <li>Upload your CV</li>
+                    <li>Add a short role preference (one sentence is enough)</li>
+                    <li>Set your visibility status</li>
+                </ol>
+
+                <p style=""margin-top: 24px;"">That's it.</p>
+
+                <p>You'll stay passive unless a company explicitly includes you in a shortlist.</p>
+
+                <p>If you're shortlisted, you'll be notified before any message is sent.</p>
+
+                <p style=""margin-top: 32px;"">Welcome — and thanks for trusting us with your profile.</p>
+
+                <p style=""margin-top: 32px; color: #6b7280;"">— The Bixo Team</p>
+            </body>
+            </html>";
+    }
+
+    public async Task SendCandidateProfileActiveEmailAsync(CandidateProfileActiveNotification notification)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_settings.ApiKey))
+            {
+                _logger.LogWarning("Email settings not configured, skipping candidate profile active email");
+                return;
+            }
+
+            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
+            var to = new EmailAddress(notification.Email);
+            var subject = "Your Bixo profile is now active";
+            var htmlContent = BuildCandidateProfileActiveEmailBody();
+
+            var msg = MailHelper.CreateSingleEmail(from, to, subject, null, htmlContent);
+
+            var response = await _client.SendEmailAsync(msg);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("Candidate profile active email sent to: {Email}", notification.Email);
+            }
+            else
+            {
+                var responseBody = await response.Body.ReadAsStringAsync();
+                _logger.LogError("SendGrid API returned {StatusCode}: {Body}", response.StatusCode, responseBody);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send candidate profile active email to: {Email}", notification.Email);
+        }
+    }
+
+    private static string BuildCandidateProfileActiveEmailBody()
+    {
+        return @"
+            <html>
+            <body style=""font-family: Arial, sans-serif; line-height: 1.8; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;"">
+                <h1 style=""color: #2563eb; margin-bottom: 24px;"">Your Bixo profile is now active</h1>
+
+                <p>You don't need to do anything else.</p>
+
+                <p style=""margin-top: 24px;"">If a company requests a shortlist that matches your profile:</p>
+
+                <ul style=""padding-left: 20px;"">
+                    <li>Your profile may be reviewed</li>
+                    <li>You'll be notified if you're shortlisted</li>
+                    <li>Companies can only message you <em>after</em> that point</li>
+                </ul>
+
+                <p style=""margin-top: 24px;"">You remain in control of your visibility at all times.</p>
+
+                <p style=""margin-top: 24px;"">We'll keep this quiet, relevant, and respectful.</p>
+
+                <p style=""margin-top: 32px; color: #6b7280;"">— Bixo</p>
             </body>
             </html>";
     }

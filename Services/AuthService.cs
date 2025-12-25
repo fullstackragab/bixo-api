@@ -18,11 +18,13 @@ public class AuthService : IAuthService
 {
     private readonly IDbConnectionFactory _db;
     private readonly JwtSettings _jwtSettings;
+    private readonly IEmailService _emailService;
 
-    public AuthService(IDbConnectionFactory db, IOptions<JwtSettings> jwtSettings)
+    public AuthService(IDbConnectionFactory db, IOptions<JwtSettings> jwtSettings, IEmailService emailService)
     {
         _db = db;
         _jwtSettings = jwtSettings.Value;
+        _emailService = emailService;
     }
 
     public async Task<AuthResponse> RegisterCandidateAsync(RegisterCandidateRequest request)
@@ -65,6 +67,13 @@ public class AuthService : IAuthService
                 LastName = request.LastName,
                 Now = now
             });
+
+        // Send welcome email (fire and forget)
+        _ = _emailService.SendCandidateWelcomeEmailAsync(new CandidateWelcomeNotification
+        {
+            Email = request.Email.ToLower(),
+            FirstName = request.FirstName
+        });
 
         return await GenerateAuthResponseAsync(userId, request.Email.ToLower(), UserType.Candidate, candidateId, null);
     }
@@ -111,6 +120,13 @@ public class AuthService : IAuthService
                 MessagesRemaining = 5,
                 Now = now
             });
+
+        // Send welcome email (fire and forget)
+        _ = _emailService.SendCompanyWelcomeEmailAsync(new CompanyWelcomeNotification
+        {
+            Email = request.Email.ToLower(),
+            CompanyName = request.CompanyName
+        });
 
         return await GenerateAuthResponseAsync(userId, request.Email.ToLower(), UserType.Company, null, companyId);
     }
