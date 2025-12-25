@@ -100,110 +100,98 @@ public class CompaniesController : ControllerBase
         return Ok(ApiResponse<List<SavedCandidateResponse>>.Ok(result));
     }
 
-    [HttpPost("talent/{talentId}/message")]
-    public async Task<ActionResult<ApiResponse<TalentMessageResponse>>> SendMessageToTalent(Guid talentId, [FromBody] SendTalentMessageRequest request)
+    [HttpPost("talent/{candidateId}/message")]
+    public async Task<ActionResult<ApiResponse<TalentMessageResponse>>> SendMessageToCandidate(Guid candidateId)
     {
         var companyId = GetCompanyId();
         using var connection = _db.CreateConnection();
 
-        // Get company info and check messages remaining
-        var company = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
-            SELECT c.id, c.user_id, c.company_name, c.messages_remaining
-            FROM companies c
-            WHERE c.id = @CompanyId",
-            new { CompanyId = companyId });
+        // Check if candidate is in any of this company's shortlists
+        var shortlistInfo = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT sr.id AS shortlist_id, sr.role_title, c.company_name
+            FROM shortlist_candidates sc
+            JOIN shortlist_requests sr ON sr.id = sc.shortlist_request_id
+            JOIN companies c ON c.id = sr.company_id
+            WHERE sc.candidate_id = @CandidateId AND sr.company_id = @CompanyId
+            LIMIT 1",
+            new { CandidateId = candidateId, CompanyId = companyId });
 
-        if (company == null)
+        if (shortlistInfo == null)
         {
-            return NotFound(ApiResponse<TalentMessageResponse>.Fail("Company not found"));
-        }
-
-        if ((int)company.messages_remaining <= 0)
-        {
-            return BadRequest(ApiResponse<TalentMessageResponse>.Fail("No messages remaining. Please upgrade your subscription."));
+            return StatusCode(403, ApiResponse<TalentMessageResponse>.Fail("Cannot message candidates outside of your shortlists"));
         }
 
         // Get candidate info
         var candidate = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
-            SELECT c.id, c.user_id, c.first_name, c.last_name, u.email
+            SELECT c.id, c.first_name, c.last_name
             FROM candidates c
-            JOIN users u ON u.id = c.user_id
             WHERE c.id = @CandidateId",
-            new { CandidateId = talentId });
+            new { CandidateId = candidateId });
 
         if (candidate == null)
         {
             return NotFound(ApiResponse<TalentMessageResponse>.Fail("Candidate not found"));
         }
 
-        // Send message
+        // Get candidate skills
+        var skills = await connection.QueryAsync<string>(@"
+            SELECT skill_name
+            FROM candidate_skills
+            WHERE candidate_id = @CandidateId
+            ORDER BY confidence_score DESC
+            LIMIT 5",
+            new { CandidateId = candidateId });
+
+        var skillsList = skills.ToList();
+        var skillsText = skillsList.Count > 0 ? string.Join(", ", skillsList) : "Your profile skills";
+
+        var firstName = candidate.first_name as string ?? "";
+        var lastName = candidate.last_name as string ?? "";
+        var candidateName = $"{firstName} {lastName}".Trim();
+        if (string.IsNullOrEmpty(candidateName)) candidateName = "Candidate";
+
+        string roleTitle = (string)shortlistInfo.role_title;
+        string companyName = (string)shortlistInfo.company_name;
+        Guid shortlistId = (Guid)shortlistInfo.shortlist_id;
+
+        var message = $@"Hi {candidateName},
+
+You have been added to a shortlist for the role of {roleTitle} at {companyName}.
+
+Key matching skills: {skillsText}
+
+This is an informational message only. You cannot reply directly.";
+
         var messageId = Guid.NewGuid();
         var now = DateTime.UtcNow;
-        var subject = request.Subject ?? $"Message from {company.company_name}";
 
         await connection.ExecuteAsync(@"
-            INSERT INTO messages (id, from_user_id, to_user_id, subject, content, is_read, created_at)
-            VALUES (@Id, @FromUserId, @ToUserId, @Subject, @Content, FALSE, @CreatedAt)",
+            INSERT INTO shortlist_messages (id, shortlist_id, company_id, candidate_id, message, created_at)
+            VALUES (@Id, @ShortlistId, @CompanyId, @CandidateId, @Message, @CreatedAt)",
             new
             {
                 Id = messageId,
-                FromUserId = (Guid)company.user_id,
-                ToUserId = (Guid)candidate.user_id,
-                Subject = subject,
-                Content = request.Content,
+                ShortlistId = shortlistId,
+                CompanyId = companyId,
+                CandidateId = candidateId,
+                Message = message,
                 CreatedAt = now
             });
-
-        // Deduct message from company's quota
-        await connection.ExecuteAsync(@"
-            UPDATE companies SET messages_remaining = messages_remaining - 1, updated_at = @Now
-            WHERE id = @CompanyId",
-            new { CompanyId = companyId, Now = now });
-
-        // Create notification for candidate
-        await connection.ExecuteAsync(@"
-            INSERT INTO notifications (id, user_id, type, title, message, is_read, created_at)
-            VALUES (@Id, @UserId, @Type, @Title, @Message, FALSE, @CreatedAt)",
-            new
-            {
-                Id = Guid.NewGuid(),
-                UserId = (Guid)candidate.user_id,
-                Type = "new_message",
-                Title = "New message",
-                Message = $"You have a new message from {company.company_name}",
-                CreatedAt = now
-            });
-
-        var candidateName = $"{candidate.first_name ?? ""} {candidate.last_name ?? ""}".Trim();
-        if (string.IsNullOrEmpty(candidateName))
-            candidateName = (string)candidate.email;
 
         return Ok(ApiResponse<TalentMessageResponse>.Ok(new TalentMessageResponse
         {
-            Id = messageId,
-            ToCandidateId = talentId,
-            ToCandidateName = candidateName,
-            Subject = subject,
-            Content = request.Content,
-            CreatedAt = now,
-            MessagesRemaining = (int)company.messages_remaining - 1
+            MessageId = messageId,
+            CandidateId = candidateId,
+            Message = message,
+            CreatedAt = now
         }, "Message sent"));
     }
 }
 
-public class SendTalentMessageRequest
-{
-    public string? Subject { get; set; }
-    public string Content { get; set; } = string.Empty;
-}
-
 public class TalentMessageResponse
 {
-    public Guid Id { get; set; }
-    public Guid ToCandidateId { get; set; }
-    public string ToCandidateName { get; set; } = string.Empty;
-    public string Subject { get; set; } = string.Empty;
-    public string Content { get; set; } = string.Empty;
+    public Guid MessageId { get; set; }
+    public Guid CandidateId { get; set; }
+    public string Message { get; set; } = string.Empty;
     public DateTime CreatedAt { get; set; }
-    public int MessagesRemaining { get; set; }
 }

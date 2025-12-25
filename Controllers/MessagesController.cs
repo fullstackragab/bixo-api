@@ -50,7 +50,7 @@ public class MessagesController : ControllerBase
         return Ok(ApiResponse<List<ConversationResponse>>.Ok(conversations));
     }
 
-    [HttpPost("{id}/read")]
+    [HttpPut("{id}/read")]
     public async Task<ActionResult<ApiResponse>> MarkAsRead(Guid id)
     {
         await _messageService.MarkAsReadAsync(GetUserId(), id);

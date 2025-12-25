@@ -18,8 +18,6 @@ public class CandidateDetailResponse
     public Guid Id { get; set; }
     public string? FirstName { get; set; }
     public string? LastName { get; set; }
-    public string? LinkedInUrl { get; set; }
-    public string? CvDownloadUrl { get; set; }
     public string? DesiredRole { get; set; }
     public string? LocationPreference { get; set; }
     public Models.Enums.RemotePreference? RemotePreference { get; set; }
@@ -29,4 +27,10 @@ public class CandidateDetailResponse
     public int RecommendationsCount { get; set; }
     public DateTime LastActiveAt { get; set; }
     public bool IsSaved { get; set; }
+
+    // Shortlist-only fields (null if not in company's shortlist)
+    public bool IsInShortlist { get; set; }
+    public string? Email { get; set; }
+    public string? LinkedInUrl { get; set; }
+    public string? CvDownloadUrl { get; set; }
 }

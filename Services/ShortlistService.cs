@@ -13,6 +13,7 @@ public class ShortlistService : IShortlistService
 {
     private readonly IDbConnectionFactory _db;
     private readonly IMatchingService _matchingService;
+    private readonly IEmailService _emailService;
 
     // Similarity threshold for detecting follow-up shortlists (0-100)
     private const int FOLLOW_UP_SIMILARITY_THRESHOLD = 70;
@@ -20,10 +21,11 @@ public class ShortlistService : IShortlistService
     // Default days for follow-up pricing eligibility
     private const int DEFAULT_FOLLOW_UP_DAYS = 30;
 
-    public ShortlistService(IDbConnectionFactory db, IMatchingService matchingService)
+    public ShortlistService(IDbConnectionFactory db, IMatchingService matchingService, IEmailService emailService)
     {
         _db = db;
         _matchingService = matchingService;
+        _emailService = emailService;
     }
 
     public async Task<List<ShortlistPricingResponse>> GetPricingAsync()
@@ -123,6 +125,29 @@ public class ShortlistService : IShortlistService
                 PricingType = pricingType,
                 FollowUpDiscount = followUpDiscount
             });
+
+        // Get company name for notification
+        var companyName = await connection.QueryFirstOrDefaultAsync<string>(@"
+            SELECT company_name FROM companies WHERE id = @CompanyId",
+            new { CompanyId = companyId }) ?? "Unknown Company";
+
+        // Build location string
+        var locationStr = isRemote ? "Remote" :
+            string.Join(", ", new[] { locationCity, locationCountry }.Where(x => !string.IsNullOrEmpty(x)));
+
+        // Send email notification
+        _ = _emailService.SendShortlistCreatedNotificationAsync(new ShortlistCreatedNotification
+        {
+            ShortlistId = shortlistId,
+            CompanyName = companyName,
+            RoleTitle = request.RoleTitle,
+            TechStack = request.TechStackRequired ?? new List<string>(),
+            Seniority = request.SeniorityRequired?.ToString(),
+            Location = locationStr,
+            IsRemote = isRemote,
+            AdditionalNotes = request.AdditionalNotes,
+            CreatedAt = now
+        });
 
         return new ShortlistResponse
         {

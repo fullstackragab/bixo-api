@@ -498,6 +498,128 @@ public class AdminController : ControllerBase
 
         return Ok(ApiResponse.Ok("Shortlist delivered"));
     }
+
+    // Support Messages Admin Endpoints
+
+    [HttpGet("support/messages")]
+    public async Task<ActionResult<ApiResponse<AdminSupportMessagePagedResponse>>> GetSupportMessages(
+        [FromQuery] string? status = null,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20)
+    {
+        using var connection = _db.CreateConnection();
+
+        var whereClause = "WHERE 1=1";
+        if (!string.IsNullOrEmpty(status))
+        {
+            whereClause += " AND status = @Status";
+        }
+
+        // Get total count
+        var countSql = $"SELECT COUNT(*) FROM support_messages {whereClause}";
+        var totalCount = await connection.ExecuteScalarAsync<int>(countSql, new { Status = status });
+
+        var sql = $@"
+            SELECT id, subject, user_type, status, created_at
+            FROM support_messages
+            {whereClause}
+            ORDER BY created_at DESC
+            LIMIT @PageSize OFFSET @Offset";
+
+        var messages = await connection.QueryAsync<dynamic>(sql,
+            new { Status = status, Offset = (page - 1) * pageSize, PageSize = pageSize });
+
+        var items = messages.Select(m => new AdminSupportMessageListResponse
+        {
+            Id = (Guid)m.id,
+            Subject = (string)m.subject,
+            UserType = (string)m.user_type,
+            Status = (string)m.status,
+            CreatedAt = (DateTime)m.created_at
+        }).ToList();
+
+        var result = new AdminSupportMessagePagedResponse
+        {
+            Items = items,
+            TotalCount = totalCount,
+            Page = page,
+            PageSize = pageSize,
+            TotalPages = (int)Math.Ceiling((double)totalCount / pageSize)
+        };
+
+        return Ok(ApiResponse<AdminSupportMessagePagedResponse>.Ok(result));
+    }
+
+    [HttpGet("support/messages/{id}")]
+    public async Task<ActionResult<ApiResponse<AdminSupportMessageDetailResponse>>> GetSupportMessage(Guid id)
+    {
+        using var connection = _db.CreateConnection();
+
+        var message = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT sm.id, sm.user_id, sm.user_type, sm.subject, sm.message, sm.email as contact_email,
+                   sm.status, sm.created_at, u.email as user_email
+            FROM support_messages sm
+            LEFT JOIN users u ON u.id = sm.user_id
+            WHERE sm.id = @Id",
+            new { Id = id });
+
+        if (message == null)
+        {
+            return NotFound(ApiResponse<AdminSupportMessageDetailResponse>.Fail("Support message not found"));
+        }
+
+        var result = new AdminSupportMessageDetailResponse
+        {
+            Id = (Guid)message.id,
+            UserId = message.user_id as Guid?,
+            UserType = (string)message.user_type,
+            UserEmail = message.user_email as string,
+            ContactEmail = message.contact_email as string,
+            Subject = (string)message.subject,
+            Message = (string)message.message,
+            Status = (string)message.status,
+            CreatedAt = (DateTime)message.created_at
+        };
+
+        return Ok(ApiResponse<AdminSupportMessageDetailResponse>.Ok(result));
+    }
+
+    [HttpPut("support/messages/{id}/status")]
+    public async Task<ActionResult<ApiResponse>> UpdateSupportMessageStatus(Guid id, [FromBody] UpdateSupportMessageStatusRequest request)
+    {
+        // Map integer status to string if needed
+        var statusMap = new Dictionary<int, string> { { 0, "new" }, { 1, "read" }, { 2, "replied" } };
+        var validStatuses = new[] { "new", "read", "replied" };
+
+        string statusValue;
+        if (request.Status != null && int.TryParse(request.Status.ToString(), out int statusInt) && statusMap.ContainsKey(statusInt))
+        {
+            statusValue = statusMap[statusInt];
+        }
+        else if (request.Status != null && validStatuses.Contains(request.Status.ToString()?.ToLower()))
+        {
+            statusValue = request.Status.ToString()!.ToLower();
+        }
+        else
+        {
+            return BadRequest(ApiResponse.Fail("Invalid status. Must be: 0/new, 1/read, or 2/replied"));
+        }
+
+        using var connection = _db.CreateConnection();
+
+        var rowsAffected = await connection.ExecuteAsync(@"
+            UPDATE support_messages
+            SET status = @Status
+            WHERE id = @Id",
+            new { Status = statusValue, Id = id });
+
+        if (rowsAffected == 0)
+        {
+            return NotFound(ApiResponse.Fail("Support message not found"));
+        }
+
+        return Ok(ApiResponse.Ok("Status updated"));
+    }
 }
 
 public class AdminDashboardResponse
@@ -685,4 +807,40 @@ public class ShortlistChainItem
     public string RoleTitle { get; set; } = string.Empty;
     public DateTime CreatedAt { get; set; }
     public int CandidatesCount { get; set; }
+}
+
+public class AdminSupportMessageListResponse
+{
+    public Guid Id { get; set; }
+    public string Subject { get; set; } = string.Empty;
+    public string UserType { get; set; } = string.Empty;
+    public string Status { get; set; } = string.Empty;
+    public DateTime CreatedAt { get; set; }
+}
+
+public class AdminSupportMessagePagedResponse
+{
+    public List<AdminSupportMessageListResponse> Items { get; set; } = new();
+    public int TotalCount { get; set; }
+    public int Page { get; set; }
+    public int PageSize { get; set; }
+    public int TotalPages { get; set; }
+}
+
+public class AdminSupportMessageDetailResponse
+{
+    public Guid Id { get; set; }
+    public Guid? UserId { get; set; }
+    public string UserType { get; set; } = string.Empty;
+    public string? UserEmail { get; set; }
+    public string? ContactEmail { get; set; }
+    public string Subject { get; set; } = string.Empty;
+    public string Message { get; set; } = string.Empty;
+    public string Status { get; set; } = string.Empty;
+    public DateTime CreatedAt { get; set; }
+}
+
+public class UpdateSupportMessageStatusRequest
+{
+    public object? Status { get; set; }
 }

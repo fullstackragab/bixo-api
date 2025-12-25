@@ -364,16 +364,26 @@ public class CompanyService : ICompanyService
     {
         using var connection = _db.CreateConnection();
 
+        // Get candidate with user email
         var candidate = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
             SELECT c.id, c.user_id, c.first_name, c.last_name, c.linkedin_url, c.cv_file_key,
                    c.desired_role, c.location_preference, c.remote_preference, c.availability,
-                   c.seniority_estimate, u.last_active_at
+                   c.seniority_estimate, u.last_active_at, u.email
             FROM candidates c
             JOIN users u ON u.id = c.user_id
             WHERE c.id = @CandidateId AND c.profile_visible = TRUE",
             new { CandidateId = candidateId });
 
         if (candidate == null) return null;
+
+        // Check if candidate is in any of this company's shortlists
+        var isInShortlist = await connection.ExecuteScalarAsync<bool>(@"
+            SELECT EXISTS(
+                SELECT 1 FROM shortlist_candidates sc
+                JOIN shortlist_requests sr ON sr.id = sc.shortlist_request_id
+                WHERE sc.candidate_id = @CandidateId AND sr.company_id = @CompanyId
+            )",
+            new { CandidateId = candidateId, CompanyId = companyId });
 
         // Record profile view
         var existingView = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
@@ -402,8 +412,9 @@ public class CompanyService : ICompanyService
                 "A company viewed your profile");
         }
 
+        // Only generate CV URL if candidate is in shortlist
         string? cvDownloadUrl = null;
-        if (!string.IsNullOrEmpty((string?)candidate.cv_file_key))
+        if (isInShortlist && !string.IsNullOrEmpty((string?)candidate.cv_file_key))
         {
             cvDownloadUrl = await _s3Service.GeneratePresignedDownloadUrlAsync((string)candidate.cv_file_key);
         }
@@ -440,8 +451,6 @@ public class CompanyService : ICompanyService
             Id = (Guid)candidate.id,
             FirstName = (string?)candidate.first_name,
             LastName = (string?)candidate.last_name,
-            LinkedInUrl = (string?)candidate.linkedin_url,
-            CvDownloadUrl = cvDownloadUrl,
             DesiredRole = (string?)candidate.desired_role,
             LocationPreference = (string?)candidate.location_preference,
             RemotePreference = candidate.remote_preference != null ? (RemotePreference)(int)candidate.remote_preference : null,
@@ -450,7 +459,12 @@ public class CompanyService : ICompanyService
             Skills = skillResponses,
             RecommendationsCount = recommendationsCount,
             LastActiveAt = (DateTime)candidate.last_active_at,
-            IsSaved = isSaved
+            IsSaved = isSaved,
+            // Shortlist-only fields - only populated if candidate is in company's shortlist
+            IsInShortlist = isInShortlist,
+            Email = isInShortlist ? (string?)candidate.email : null,
+            LinkedInUrl = isInShortlist ? (string?)candidate.linkedin_url : null,
+            CvDownloadUrl = cvDownloadUrl
         };
     }
 

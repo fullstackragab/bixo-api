@@ -11,7 +11,10 @@
       "Bash(set PGPASSWORD=postgres:*)",
       "Bash($env:PGPASSWORD='postgres')",
       "Bash(PGPASSWORD=postgres psql:*)",
-      "Bash(dotnet restore:*)"
+      "Bash(dotnet restore:*)",
+      "Bash(dotnet add:*)",
+      "Bash(dir:*)",
+      "Bash(findstr:*)"
     ]
   }
 }
