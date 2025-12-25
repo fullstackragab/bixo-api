@@ -191,13 +191,14 @@ POST /api/shortlists/{id}/payment/confirm
 
 | Value | Name | Description |
 |-------|------|-------------|
-| 0 | `PendingScope` | Request submitted, awaiting admin review |
-| 1 | `ScopeProposed` | Admin reviewed, scope and price proposed |
-| 2 | `ScopeApproved` | Company approved, payment authorized |
-| 3 | `Processing` | Shortlist being curated |
-| 4 | `Delivered` | Delivered, payment captured |
-| 5 | `Canceled` | Canceled at any stage |
-| 6 | `NoCharge` | No candidates found, authorization released |
+| 0 | `Draft` | Request created, not yet being processed |
+| 1 | `Matching` | System is matching candidates |
+| 2 | `ReadyForPricing` | Candidates matched, ready for pricing |
+| 3 | `PricingRequested` | Pricing sent to company, awaiting approval |
+| 4 | `PricingApproved` | Company approved pricing, payment authorized |
+| 5 | `Delivered` | Shortlist delivered to company |
+| 6 | `PaymentCaptured` | Payment captured after delivery |
+| 7 | `Cancelled` | Cancelled at any stage |
 
 ### PaymentStatus
 

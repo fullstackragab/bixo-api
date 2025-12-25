@@ -32,7 +32,7 @@ public class AdminController : ControllerBase
             TotalCandidates = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM candidates"),
             ActiveCandidates = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM candidates WHERE open_to_opportunities = TRUE"),
             TotalCompanies = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM companies"),
-            PendingShortlists = await connection.ExecuteScalarAsync<int>($"SELECT COUNT(*) FROM shortlist_requests WHERE status IN ({(int)ShortlistStatus.PendingScope}, {(int)ShortlistStatus.ScopeProposed}, {(int)ShortlistStatus.ScopeApproved}, {(int)ShortlistStatus.Processing})"),
+            PendingShortlists = await connection.ExecuteScalarAsync<int>($"SELECT COUNT(*) FROM shortlist_requests WHERE status IN ({(int)ShortlistStatus.Draft}, {(int)ShortlistStatus.Matching}, {(int)ShortlistStatus.ReadyForPricing}, {(int)ShortlistStatus.PricingRequested}, {(int)ShortlistStatus.PricingApproved})"),
             CompletedShortlists = await connection.ExecuteScalarAsync<int>($"SELECT COUNT(*) FROM shortlist_requests WHERE status = {(int)ShortlistStatus.Delivered}"),
             TotalRevenue = await connection.ExecuteScalarAsync<decimal?>($"SELECT COALESCE(SUM(amount_captured), 0) FROM payments WHERE status IN ('{PaymentStatus.Captured.ToString().ToLower()}', '{PaymentStatus.Partial.ToString().ToLower()}')") ?? 0,
             RecentSignups = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM users WHERE created_at >= @Cutoff", new { Cutoff = DateTime.UtcNow.AddDays(-7) })

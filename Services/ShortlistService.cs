@@ -129,7 +129,7 @@ public class ShortlistService : IShortlistService
                 LocationCity = locationCity,
                 LocationTimezone = locationTimezone,
                 AdditionalNotes = request.AdditionalNotes,
-                Status = (int)ShortlistStatus.PendingScope,
+                Status = (int)ShortlistStatus.Draft,
                 CreatedAt = now,
                 PreviousRequestId = previousRequestId,
                 PricingType = pricingType,
@@ -175,7 +175,7 @@ public class ShortlistService : IShortlistService
             },
             RemoteAllowed = isRemote, // Keep legacy field populated
             AdditionalNotes = request.AdditionalNotes,
-            Status = ShortlistStatus.PendingScope,
+            Status = ShortlistStatus.Draft,
             PricePaid = null,
             CreatedAt = now,
             CompletedAt = null,
@@ -503,7 +503,7 @@ public class ShortlistService : IShortlistService
 
         await connection.ExecuteAsync(
             "UPDATE shortlist_requests SET status = @Status WHERE id = @Id",
-            new { Status = (int)ShortlistStatus.Processing, Id = shortlistId });
+            new { Status = (int)ShortlistStatus.Matching, Id = shortlistId });
 
         // Check if this is a follow-up shortlist
         var previousRequestId = shortlist.previous_request_id as Guid?;
@@ -541,7 +541,7 @@ public class ShortlistService : IShortlistService
             LocationCity = shortlist.location_city as string,
             LocationTimezone = shortlist.location_timezone as string,
             AdditionalNotes = shortlist.additional_notes as string,
-            Status = ShortlistStatus.Processing
+            Status = ShortlistStatus.Matching
         };
 
         // Find matches with candidate exclusion and freshness boost
@@ -836,7 +836,7 @@ Declining will not affect your visibility for future opportunities.";
             return new ScopeProposalResult { Success = false, ErrorMessage = "Shortlist not found" };
         }
 
-        if ((int)shortlist.status != (int)ShortlistStatus.PendingScope)
+        if ((int)shortlist.status != (int)ShortlistStatus.Draft)
         {
             return new ScopeProposalResult { Success = false, ErrorMessage = "Shortlist is not pending scope review" };
         }
@@ -852,7 +852,7 @@ Declining will not affect your visibility for future opportunities.";
             WHERE id = @Id",
             new
             {
-                Status = (int)ShortlistStatus.ScopeProposed,
+                Status = (int)ShortlistStatus.PricingRequested,
                 ProposedCandidates = request.ProposedCandidates,
                 ProposedPrice = request.ProposedPrice,
                 Now = DateTime.UtcNow,
@@ -889,7 +889,7 @@ Declining will not affect your visibility for future opportunities.";
             return new ScopeApprovalResult { Success = false, ErrorMessage = "Shortlist not found" };
         }
 
-        if ((int)shortlist.status != (int)ShortlistStatus.ScopeProposed)
+        if ((int)shortlist.status != (int)ShortlistStatus.PricingRequested)
         {
             return new ScopeApprovalResult { Success = false, ErrorMessage = "Shortlist does not have a pending scope proposal" };
         }
@@ -927,7 +927,7 @@ Declining will not affect your visibility for future opportunities.";
             WHERE id = @Id",
             new
             {
-                Status = (int)ShortlistStatus.ScopeApproved,
+                Status = (int)ShortlistStatus.PricingApproved,
                 Now = DateTime.UtcNow,
                 PaymentId = paymentResult.PaymentId,
                 Id = shortlistRequestId
@@ -952,7 +952,7 @@ Declining will not affect your visibility for future opportunities.";
             FROM shortlist_requests
             WHERE company_id = @CompanyId AND status = @Status
             ORDER BY scope_proposed_at DESC",
-            new { CompanyId = companyId, Status = (int)ShortlistStatus.ScopeProposed });
+            new { CompanyId = companyId, Status = (int)ShortlistStatus.PricingRequested });
 
         return proposals.Select(p => new ScopeProposalResponse
         {

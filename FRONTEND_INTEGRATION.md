@@ -41,7 +41,12 @@ All enums are now serialized as **camelCase strings** instead of integers.
 
 ### ShortlistStatus
 ```json
-"pendingScope" | "scopeProposed" | "scopeApproved" | "processing" | "delivered" | "canceled" | "noCharge"
+"draft" | "matching" | "readyForPricing" | "pricingRequested" | "pricingApproved" | "delivered" | "paymentCaptured" | "cancelled"
+```
+
+**Lifecycle Flow:**
+```
+Draft → Matching → ReadyForPricing → PricingRequested → PricingApproved → Delivered → PaymentCaptured
 ```
 
 ### PaymentStatus
@@ -53,15 +58,21 @@ All enums are now serialized as **camelCase strings** instead of integers.
 
 ---
 
-## 3. Payment Authorization Flow
+## 3. Shortlist Lifecycle & Payment Flow
 
 ### Status Flow
 ```
-PendingScope → ScopeProposed → ScopeApproved → Processing → Delivered
-     ↓              ↓               ↓              ↓            ↓
-  Company       Admin sets      Company        Admin         Payment
-  requests      price/scope     approves       processes     captured
+Draft → Matching → ReadyForPricing → PricingRequested → PricingApproved → Delivered → PaymentCaptured
+  ↓         ↓             ↓                ↓                  ↓              ↓              ↓
+Create   System      Candidates      Pricing sent       Company        Shortlist      Payment
+request  matches     matched         to company         approves       delivered      captured
 ```
+
+### Key Rules
+- Payment authorization happens at `PricingApproved` (not before)
+- Payment capture ONLY happens after `Delivered`
+- Admins cannot set prices or capture payments directly
+- All state transitions are validated and logged
 
 ### Company Endpoints
 
