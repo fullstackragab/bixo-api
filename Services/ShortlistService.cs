@@ -149,8 +149,8 @@ public class ShortlistService : IShortlistService
         var locationStr = isRemote ? "Remote" :
             string.Join(", ", new[] { locationCity, locationCountry }.Where(x => !string.IsNullOrEmpty(x)));
 
-        // Send email notification
-        _ = _emailService.SendShortlistCreatedNotificationAsync(new ShortlistCreatedNotification
+        // Send admin email notification
+        _ = _emailService.SendAdminNewShortlistNotificationAsync(new AdminNewShortlistNotification
         {
             ShortlistId = shortlistId,
             CompanyName = companyName,

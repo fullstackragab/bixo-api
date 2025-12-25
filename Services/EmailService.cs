@@ -76,45 +76,6 @@ public class EmailService : IEmailService
         }
     }
 
-    public async Task SendShortlistCreatedNotificationAsync(ShortlistCreatedNotification notification)
-    {
-        try
-        {
-            var shortlistFrom = !string.IsNullOrEmpty(_settings.ShortlistFromEmail)
-                ? _settings.ShortlistFromEmail
-                : _settings.FromEmail;
-
-            if (string.IsNullOrEmpty(_settings.ApiKey) || string.IsNullOrEmpty(_settings.SupportInboxEmail))
-            {
-                _logger.LogWarning("Email settings not configured, skipping shortlist notification email");
-                return;
-            }
-
-            var from = new EmailAddress(shortlistFrom, _settings.FromName);
-            var to = new EmailAddress(_settings.SupportInboxEmail);
-            var subject = $"[New Shortlist] {notification.RoleTitle} - {notification.CompanyName}";
-            var htmlContent = BuildShortlistEmailBody(notification);
-
-            var msg = MailHelper.CreateSingleEmail(from, to, subject, null, htmlContent);
-
-            var response = await _client.SendEmailAsync(msg);
-
-            if (response.IsSuccessStatusCode)
-            {
-                _logger.LogInformation("Shortlist notification email sent for: {RoleTitle}", notification.RoleTitle);
-            }
-            else
-            {
-                var responseBody = await response.Body.ReadAsStringAsync();
-                _logger.LogError("SendGrid API returned {StatusCode}: {Body}", response.StatusCode, responseBody);
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to send shortlist notification email for: {RoleTitle}", notification.RoleTitle);
-        }
-    }
-
     private static string BuildEmailBody(SupportNotification notification)
     {
         var userInfo = notification.UserId.HasValue
@@ -141,40 +102,6 @@ public class EmailService : IEmailService
                 <div style=""background-color: #f9fafb; padding: 15px; border-radius: 5px;"">
                     <p>{notification.Message.Replace("\n", "<br />")}</p>
                 </div>
-            </body>
-            </html>";
-    }
-
-    private static string BuildShortlistEmailBody(ShortlistCreatedNotification notification)
-    {
-        var techStack = notification.TechStack.Count > 0
-            ? string.Join(", ", notification.TechStack)
-            : "Not specified";
-
-        var location = notification.IsRemote
-            ? "Remote"
-            : (!string.IsNullOrEmpty(notification.Location) ? notification.Location : "Not specified");
-
-        var notes = !string.IsNullOrEmpty(notification.AdditionalNotes)
-            ? $@"<h3>Additional Notes</h3>
-                <div style=""background-color: #f9fafb; padding: 15px; border-radius: 5px;"">
-                    <p>{notification.AdditionalNotes.Replace("\n", "<br />")}</p>
-                </div>"
-            : "";
-
-        return $@"
-            <html>
-            <body style=""font-family: Arial, sans-serif; line-height: 1.6; color: #333;"">
-                <h2 style=""color: #2563eb;"">New Shortlist Request</h2>
-                <hr style=""border: 1px solid #e5e7eb;"" />
-                <p><strong>Company:</strong> {notification.CompanyName}</p>
-                <p><strong>Role:</strong> {notification.RoleTitle}</p>
-                <p><strong>Seniority:</strong> {notification.Seniority ?? "Not specified"}</p>
-                <p><strong>Location:</strong> {location}</p>
-                <p><strong>Tech Stack:</strong> {techStack}</p>
-                <p><strong>Shortlist ID:</strong> {notification.ShortlistId}</p>
-                <p><strong>Created:</strong> {notification.CreatedAt:yyyy-MM-dd HH:mm:ss} UTC</p>
-                {notes}
             </body>
             </html>";
     }
@@ -457,6 +384,185 @@ public class EmailService : IEmailService
                 <p style=""margin-top: 24px;"">We'll keep this quiet, relevant, and respectful.</p>
 
                 <p style=""margin-top: 32px; color: #6b7280;"">— Bixo</p>
+            </body>
+            </html>";
+    }
+
+    public async Task SendAdminNewCandidateNotificationAsync(AdminNewCandidateNotification notification)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_settings.ApiKey) || string.IsNullOrEmpty(_settings.AdminInboxEmail))
+            {
+                _logger.LogWarning("Email settings not configured, skipping admin new candidate notification");
+                return;
+            }
+
+            var fromEmail = !string.IsNullOrEmpty(_settings.RegisterFromEmail)
+                ? _settings.RegisterFromEmail
+                : _settings.FromEmail;
+            var from = new EmailAddress(fromEmail, _settings.FromName);
+            var to = new EmailAddress(_settings.AdminInboxEmail);
+            var subject = $"[New Candidate] {notification.FirstName} {notification.LastName}";
+            var htmlContent = BuildAdminNewCandidateEmailBody(notification);
+
+            var msg = MailHelper.CreateSingleEmail(from, to, subject, null, htmlContent);
+
+            var response = await _client.SendEmailAsync(msg);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("Admin new candidate notification sent for: {Email}", notification.Email);
+            }
+            else
+            {
+                var responseBody = await response.Body.ReadAsStringAsync();
+                _logger.LogError("SendGrid API returned {StatusCode}: {Body}", response.StatusCode, responseBody);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send admin new candidate notification for: {Email}", notification.Email);
+        }
+    }
+
+    private static string BuildAdminNewCandidateEmailBody(AdminNewCandidateNotification notification)
+    {
+        var name = $"{notification.FirstName} {notification.LastName}".Trim();
+        if (string.IsNullOrEmpty(name)) name = "Not provided";
+
+        return $@"
+            <html>
+            <body style=""font-family: Arial, sans-serif; line-height: 1.6; color: #333;"">
+                <h2 style=""color: #2563eb;"">New Candidate Registration</h2>
+                <hr style=""border: 1px solid #e5e7eb;"" />
+                <p><strong>Name:</strong> {name}</p>
+                <p><strong>Email:</strong> {notification.Email}</p>
+                <p><strong>Candidate ID:</strong> {notification.CandidateId}</p>
+                <p><strong>Registered:</strong> {notification.CreatedAt:yyyy-MM-dd HH:mm:ss} UTC</p>
+            </body>
+            </html>";
+    }
+
+    public async Task SendAdminNewCompanyNotificationAsync(AdminNewCompanyNotification notification)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_settings.ApiKey) || string.IsNullOrEmpty(_settings.AdminInboxEmail))
+            {
+                _logger.LogWarning("Email settings not configured, skipping admin new company notification");
+                return;
+            }
+
+            var fromEmail = !string.IsNullOrEmpty(_settings.RegisterFromEmail)
+                ? _settings.RegisterFromEmail
+                : _settings.FromEmail;
+            var from = new EmailAddress(fromEmail, _settings.FromName);
+            var to = new EmailAddress(_settings.AdminInboxEmail);
+            var subject = $"[New Company] {notification.CompanyName}";
+            var htmlContent = BuildAdminNewCompanyEmailBody(notification);
+
+            var msg = MailHelper.CreateSingleEmail(from, to, subject, null, htmlContent);
+
+            var response = await _client.SendEmailAsync(msg);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("Admin new company notification sent for: {CompanyName}", notification.CompanyName);
+            }
+            else
+            {
+                var responseBody = await response.Body.ReadAsStringAsync();
+                _logger.LogError("SendGrid API returned {StatusCode}: {Body}", response.StatusCode, responseBody);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send admin new company notification for: {CompanyName}", notification.CompanyName);
+        }
+    }
+
+    private static string BuildAdminNewCompanyEmailBody(AdminNewCompanyNotification notification)
+    {
+        return $@"
+            <html>
+            <body style=""font-family: Arial, sans-serif; line-height: 1.6; color: #333;"">
+                <h2 style=""color: #2563eb;"">New Company Registration</h2>
+                <hr style=""border: 1px solid #e5e7eb;"" />
+                <p><strong>Company Name:</strong> {notification.CompanyName}</p>
+                <p><strong>Email:</strong> {notification.Email}</p>
+                <p><strong>Industry:</strong> {notification.Industry ?? "Not specified"}</p>
+                <p><strong>Company ID:</strong> {notification.CompanyId}</p>
+                <p><strong>Registered:</strong> {notification.CreatedAt:yyyy-MM-dd HH:mm:ss} UTC</p>
+            </body>
+            </html>";
+    }
+
+    public async Task SendAdminNewShortlistNotificationAsync(AdminNewShortlistNotification notification)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_settings.ApiKey) || string.IsNullOrEmpty(_settings.AdminInboxEmail))
+            {
+                _logger.LogWarning("Email settings not configured, skipping admin new shortlist notification");
+                return;
+            }
+
+            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
+            var to = new EmailAddress(_settings.AdminInboxEmail);
+            var subject = $"[New Shortlist] {notification.RoleTitle} - {notification.CompanyName}";
+            var htmlContent = BuildAdminNewShortlistEmailBody(notification);
+
+            var msg = MailHelper.CreateSingleEmail(from, to, subject, null, htmlContent);
+
+            var response = await _client.SendEmailAsync(msg);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("Admin new shortlist notification sent for: {RoleTitle}", notification.RoleTitle);
+            }
+            else
+            {
+                var responseBody = await response.Body.ReadAsStringAsync();
+                _logger.LogError("SendGrid API returned {StatusCode}: {Body}", response.StatusCode, responseBody);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send admin new shortlist notification for: {RoleTitle}", notification.RoleTitle);
+        }
+    }
+
+    private static string BuildAdminNewShortlistEmailBody(AdminNewShortlistNotification notification)
+    {
+        var techStack = notification.TechStack.Count > 0
+            ? string.Join(", ", notification.TechStack)
+            : "Not specified";
+
+        var location = notification.IsRemote
+            ? "Remote"
+            : (!string.IsNullOrEmpty(notification.Location) ? notification.Location : "Not specified");
+
+        var notes = !string.IsNullOrEmpty(notification.AdditionalNotes)
+            ? $@"<h3>Additional Notes</h3>
+                <div style=""background-color: #f9fafb; padding: 15px; border-radius: 5px;"">
+                    <p>{notification.AdditionalNotes.Replace("\n", "<br />")}</p>
+                </div>"
+            : "";
+
+        return $@"
+            <html>
+            <body style=""font-family: Arial, sans-serif; line-height: 1.6; color: #333;"">
+                <h2 style=""color: #2563eb;"">New Shortlist Request</h2>
+                <hr style=""border: 1px solid #e5e7eb;"" />
+                <p><strong>Company:</strong> {notification.CompanyName}</p>
+                <p><strong>Role:</strong> {notification.RoleTitle}</p>
+                <p><strong>Seniority:</strong> {notification.Seniority ?? "Not specified"}</p>
+                <p><strong>Location:</strong> {location}</p>
+                <p><strong>Tech Stack:</strong> {techStack}</p>
+                <p><strong>Shortlist ID:</strong> {notification.ShortlistId}</p>
+                <p><strong>Created:</strong> {notification.CreatedAt:yyyy-MM-dd HH:mm:ss} UTC</p>
+                {notes}
             </body>
             </html>";
     }

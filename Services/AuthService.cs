@@ -75,6 +75,16 @@ public class AuthService : IAuthService
             FirstName = request.FirstName
         });
 
+        // Send admin notification (fire and forget)
+        _ = _emailService.SendAdminNewCandidateNotificationAsync(new AdminNewCandidateNotification
+        {
+            CandidateId = candidateId,
+            Email = request.Email.ToLower(),
+            FirstName = request.FirstName,
+            LastName = request.LastName,
+            CreatedAt = now
+        });
+
         return await GenerateAuthResponseAsync(userId, request.Email.ToLower(), UserType.Candidate, candidateId, null);
     }
 
@@ -126,6 +136,16 @@ public class AuthService : IAuthService
         {
             Email = request.Email.ToLower(),
             CompanyName = request.CompanyName
+        });
+
+        // Send admin notification (fire and forget)
+        _ = _emailService.SendAdminNewCompanyNotificationAsync(new AdminNewCompanyNotification
+        {
+            CompanyId = companyId,
+            Email = request.Email.ToLower(),
+            CompanyName = request.CompanyName,
+            Industry = request.Industry,
+            CreatedAt = now
         });
 
         return await GenerateAuthResponseAsync(userId, request.Email.ToLower(), UserType.Company, null, companyId);

@@ -3,11 +3,13 @@ namespace bixo_api.Services.Interfaces;
 public interface IEmailService
 {
     Task SendSupportNotificationAsync(SupportNotification notification);
-    Task SendShortlistCreatedNotificationAsync(ShortlistCreatedNotification notification);
     Task SendCompanyWelcomeEmailAsync(CompanyWelcomeNotification notification);
     Task SendShortlistDeliveredEmailAsync(ShortlistDeliveredNotification notification);
     Task SendCandidateWelcomeEmailAsync(CandidateWelcomeNotification notification);
     Task SendCandidateProfileActiveEmailAsync(CandidateProfileActiveNotification notification);
+    Task SendAdminNewCandidateNotificationAsync(AdminNewCandidateNotification notification);
+    Task SendAdminNewCompanyNotificationAsync(AdminNewCompanyNotification notification);
+    Task SendAdminNewShortlistNotificationAsync(AdminNewShortlistNotification notification);
 }
 
 public class SupportNotification
@@ -17,19 +19,6 @@ public class SupportNotification
     public string Subject { get; set; } = string.Empty;
     public string Message { get; set; } = string.Empty;
     public string? ReplyToEmail { get; set; }
-    public DateTime CreatedAt { get; set; }
-}
-
-public class ShortlistCreatedNotification
-{
-    public Guid ShortlistId { get; set; }
-    public string CompanyName { get; set; } = string.Empty;
-    public string RoleTitle { get; set; } = string.Empty;
-    public List<string> TechStack { get; set; } = new();
-    public string? Seniority { get; set; }
-    public string? Location { get; set; }
-    public bool IsRemote { get; set; }
-    public string? AdditionalNotes { get; set; }
     public DateTime CreatedAt { get; set; }
 }
 
@@ -57,4 +46,35 @@ public class CandidateProfileActiveNotification
 {
     public string Email { get; set; } = string.Empty;
     public string? FirstName { get; set; }
+}
+
+public class AdminNewCandidateNotification
+{
+    public Guid CandidateId { get; set; }
+    public string Email { get; set; } = string.Empty;
+    public string? FirstName { get; set; }
+    public string? LastName { get; set; }
+    public DateTime CreatedAt { get; set; }
+}
+
+public class AdminNewCompanyNotification
+{
+    public Guid CompanyId { get; set; }
+    public string Email { get; set; } = string.Empty;
+    public string CompanyName { get; set; } = string.Empty;
+    public string? Industry { get; set; }
+    public DateTime CreatedAt { get; set; }
+}
+
+public class AdminNewShortlistNotification
+{
+    public Guid ShortlistId { get; set; }
+    public string CompanyName { get; set; } = string.Empty;
+    public string RoleTitle { get; set; } = string.Empty;
+    public List<string> TechStack { get; set; } = new();
+    public string? Seniority { get; set; }
+    public string? Location { get; set; }
+    public bool IsRemote { get; set; }
+    public string? AdditionalNotes { get; set; }
+    public DateTime CreatedAt { get; set; }
 }

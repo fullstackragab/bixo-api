@@ -14,7 +14,9 @@
       "Bash(dotnet restore:*)",
       "Bash(dotnet add:*)",
       "Bash(dir:*)",
-      "Bash(findstr:*)"
+      "Bash(findstr:*)",
+      "Bash(PGPASSWORD=UDU9qSGUSaMRHhYczjOd4Zi4xsoHq3KU psql:*)",
+      "Bash(powershell:*)"
     ]
   }
 }
