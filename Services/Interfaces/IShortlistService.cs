@@ -1,4 +1,5 @@
 using bixo_api.Models.DTOs.Shortlist;
+using bixo_api.Models.Enums;
 
 namespace bixo_api.Services.Interfaces;
 
@@ -47,6 +48,13 @@ public interface IShortlistService
     // === Manual Payment Settlement ===
 
     /// <summary>
+    /// Admin marks shortlist as having no suitable candidates.
+    /// Sets outcome to NoMatch, payment_status to NotRequired, and closes the shortlist.
+    /// This is irreversible - company will not be charged.
+    /// </summary>
+    Task<NoMatchResult> MarkAsNoMatchAsync(Guid shortlistRequestId, Guid adminUserId, string reason);
+
+    /// <summary>
     /// Admin marks shortlist as paid (sets paymentStatus = paid).
     /// Allowed only when status = Delivered.
     /// </summary>
@@ -69,6 +77,25 @@ public interface IShortlistService
 
     // Legacy method - kept for compatibility during migration
     Task<ScopeApprovalResult> ApproveScopeAsync(Guid companyId, Guid shortlistRequestId, ScopeApprovalRequest request);
+
+    // === Email Event Tracking (idempotent) ===
+
+    /// <summary>
+    /// Send email event for shortlist if not already sent.
+    /// Returns true if email was sent, false if already sent.
+    /// </summary>
+    Task<bool> TrySendEmailEventAsync(Guid shortlistRequestId, ShortlistEmailEvent emailEvent);
+
+    /// <summary>
+    /// Admin manually resends the last email for a shortlist.
+    /// Creates a new record with is_resend = true.
+    /// </summary>
+    Task ResendLastEmailAsync(Guid shortlistRequestId, Guid adminUserId);
+
+    /// <summary>
+    /// Get email history for a shortlist (for admin UI).
+    /// </summary>
+    Task<List<ShortlistEmailRecord>> GetEmailHistoryAsync(Guid shortlistRequestId);
 }
 
 public class ShortlistPriceEstimate
@@ -147,4 +174,20 @@ public class ScopeProposalResponse
     public decimal ProposedPrice { get; set; }
     public DateTime ProposedAt { get; set; }
     public string? Notes { get; set; }
+}
+
+public class NoMatchResult
+{
+    public bool Success { get; set; }
+    public string? ErrorMessage { get; set; }
+}
+
+public class ShortlistEmailRecord
+{
+    public Guid Id { get; set; }
+    public ShortlistEmailEvent EmailEvent { get; set; }
+    public DateTime SentAt { get; set; }
+    public string SentTo { get; set; } = string.Empty;
+    public Guid? SentBy { get; set; }
+    public bool IsResend { get; set; }
 }

@@ -57,6 +57,22 @@ public class ShortlistResponse
 
     /// <summary>Notes from admin about the scope</summary>
     public string? ScopeNotes { get; set; }
+
+    // === Outcome tracking (visible to company) ===
+
+    /// <summary>Final outcome of the shortlist request</summary>
+    public ShortlistOutcome Outcome { get; set; } = ShortlistOutcome.Pending;
+
+    /// <summary>Explanation for the outcome (e.g., why no suitable candidates)</summary>
+    public string? OutcomeReason { get; set; }
+
+    /// <summary>When the outcome was decided</summary>
+    public DateTime? OutcomeDecidedAt { get; set; }
+
+    /// <summary>
+    /// True if company will not be charged for this shortlist (NoMatch or Cancelled outcome)
+    /// </summary>
+    public bool WillNotBeCharged => Outcome == ShortlistOutcome.NoMatch || Outcome == ShortlistOutcome.Cancelled;
 }
 
 /// <summary>

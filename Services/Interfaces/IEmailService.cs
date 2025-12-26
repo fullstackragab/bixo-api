@@ -4,12 +4,25 @@ public interface IEmailService
 {
     Task SendSupportNotificationAsync(SupportNotification notification);
     Task SendCompanyWelcomeEmailAsync(CompanyWelcomeNotification notification);
-    Task SendShortlistDeliveredEmailAsync(ShortlistDeliveredNotification notification);
     Task SendCandidateWelcomeEmailAsync(CandidateWelcomeNotification notification);
     Task SendCandidateProfileActiveEmailAsync(CandidateProfileActiveNotification notification);
     Task SendAdminNewCandidateNotificationAsync(AdminNewCandidateNotification notification);
     Task SendAdminNewCompanyNotificationAsync(AdminNewCompanyNotification notification);
     Task SendAdminNewShortlistNotificationAsync(AdminNewShortlistNotification notification);
+
+    // === Shortlist Status Email Events (idempotent, sent once per event type) ===
+
+    /// <summary>Sent when pricing is ready for company review</summary>
+    Task SendShortlistPricingReadyEmailAsync(ShortlistPricingReadyNotification notification);
+
+    /// <summary>Sent when payment authorization is required</summary>
+    Task SendShortlistAuthorizationRequiredEmailAsync(ShortlistAuthorizationRequiredNotification notification);
+
+    /// <summary>Sent when shortlist has been delivered</summary>
+    Task SendShortlistDeliveredEmailAsync(ShortlistDeliveredNotification notification);
+
+    /// <summary>Sent when no suitable candidates found</summary>
+    Task SendShortlistNoMatchEmailAsync(ShortlistNoMatchNotification notification);
 }
 
 public class SupportNotification
@@ -28,12 +41,43 @@ public class CompanyWelcomeNotification
     public string? CompanyName { get; set; }
 }
 
+/// <summary>Sent when pricing is ready for company review</summary>
+public class ShortlistPricingReadyNotification
+{
+    public string Email { get; set; } = string.Empty;
+    public string RoleTitle { get; set; } = string.Empty;
+    public Guid ShortlistId { get; set; }
+    public string ShortlistUrl { get; set; } = string.Empty;
+}
+
+/// <summary>Sent when payment authorization is required</summary>
+public class ShortlistAuthorizationRequiredNotification
+{
+    public string Email { get; set; } = string.Empty;
+    public string RoleTitle { get; set; } = string.Empty;
+    public Guid ShortlistId { get; set; }
+    public string ShortlistUrl { get; set; } = string.Empty;
+}
+
+/// <summary>Sent when shortlist has been delivered</summary>
 public class ShortlistDeliveredNotification
 {
     public string Email { get; set; } = string.Empty;
     public string RoleTitle { get; set; } = string.Empty;
     public int CandidatesCount { get; set; }
     public Guid ShortlistId { get; set; }
+    public string ShortlistUrl { get; set; } = string.Empty;
+}
+
+/// <summary>Sent when no suitable candidates found</summary>
+public class ShortlistNoMatchNotification
+{
+    public string Email { get; set; } = string.Empty;
+    public string CompanyName { get; set; } = string.Empty;
+    public string RoleTitle { get; set; } = string.Empty;
+    public string Reason { get; set; } = string.Empty;
+    public Guid ShortlistId { get; set; }
+    public string ShortlistUrl { get; set; } = string.Empty;
 }
 
 public class CandidateWelcomeNotification

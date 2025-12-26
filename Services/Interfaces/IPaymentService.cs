@@ -22,7 +22,7 @@ public interface IPaymentService
     /// Finalize payment based on shortlist outcome.
     /// Captures full/partial or releases authorization.
     /// </summary>
-    Task<PaymentFinalizationResult> FinalizePaymentAsync(Guid shortlistRequestId, ShortlistOutcome outcome);
+    Task<PaymentFinalizationResult> FinalizePaymentAsync(Guid shortlistRequestId, PaymentOutcome outcome);
 
     /// <summary>
     /// Get payment status for a shortlist request.
@@ -72,7 +72,7 @@ public class PaymentInitiationResult
     public string? ErrorMessage { get; set; }
 }
 
-public class ShortlistOutcome
+public class PaymentOutcome
 {
     public string Status { get; set; } = "fulfilled"; // fulfilled | partial | no_match
     public int CandidatesDelivered { get; set; }

@@ -10,4 +10,7 @@ public class EmailSettings
     public string AdminInboxEmail { get; set; } = string.Empty;
     public string RegisterFromEmail { get; set; } = string.Empty;
     public string DataResidency { get; set; } = "eu"; // "eu" or "global"
+
+    /// <summary>Frontend URL for generating deep links in emails</summary>
+    public string FrontendUrl { get; set; } = "https://app.bixo.io";
 }

@@ -183,6 +183,120 @@ public class EmailService : IEmailService
             </html>";
     }
 
+    // === Shortlist Status Email Events ===
+
+    public async Task SendShortlistPricingReadyEmailAsync(ShortlistPricingReadyNotification notification)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_settings.ApiKey))
+            {
+                _logger.LogWarning("Email settings not configured, skipping pricing ready email");
+                return;
+            }
+
+            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
+            var to = new EmailAddress(notification.Email);
+            var subject = "Your shortlist request is ready for review";
+            var htmlContent = BuildShortlistPricingReadyEmailBody(notification.ShortlistUrl);
+
+            var msg = MailHelper.CreateSingleEmail(from, to, subject, null, htmlContent);
+
+            var response = await _client.SendEmailAsync(msg);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("Pricing ready email sent to: {Email} for shortlist {ShortlistId}",
+                    notification.Email, notification.ShortlistId);
+            }
+            else
+            {
+                var responseBody = await response.Body.ReadAsStringAsync();
+                _logger.LogError("SendGrid API returned {StatusCode}: {Body}", response.StatusCode, responseBody);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send pricing ready email to: {Email}", notification.Email);
+        }
+    }
+
+    private static string BuildShortlistPricingReadyEmailBody(string shortlistUrl)
+    {
+        return $@"
+            <html>
+            <body style=""font-family: Arial, sans-serif; line-height: 1.8; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;"">
+                <h1 style=""color: #2563eb; margin-bottom: 24px;"">Your shortlist request is ready for review</h1>
+
+                <p>We've reviewed your request and prepared a proposed shortlist based on your role requirements.</p>
+
+                <p>Please review the details and confirm to continue.</p>
+
+                <p style=""margin-top: 32px;"">
+                    <a href=""{shortlistUrl}"" style=""background-color: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;"">View request</a>
+                </p>
+
+                <p style=""margin-top: 32px; color: #6b7280;"">— Bixo</p>
+            </body>
+            </html>";
+    }
+
+    public async Task SendShortlistAuthorizationRequiredEmailAsync(ShortlistAuthorizationRequiredNotification notification)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_settings.ApiKey))
+            {
+                _logger.LogWarning("Email settings not configured, skipping authorization required email");
+                return;
+            }
+
+            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
+            var to = new EmailAddress(notification.Email);
+            var subject = "Approval needed to continue your shortlist request";
+            var htmlContent = BuildShortlistAuthorizationRequiredEmailBody(notification.ShortlistUrl);
+
+            var msg = MailHelper.CreateSingleEmail(from, to, subject, null, htmlContent);
+
+            var response = await _client.SendEmailAsync(msg);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("Authorization required email sent to: {Email} for shortlist {ShortlistId}",
+                    notification.Email, notification.ShortlistId);
+            }
+            else
+            {
+                var responseBody = await response.Body.ReadAsStringAsync();
+                _logger.LogError("SendGrid API returned {StatusCode}: {Body}", response.StatusCode, responseBody);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send authorization required email to: {Email}", notification.Email);
+        }
+    }
+
+    private static string BuildShortlistAuthorizationRequiredEmailBody(string shortlistUrl)
+    {
+        return $@"
+            <html>
+            <body style=""font-family: Arial, sans-serif; line-height: 1.8; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;"">
+                <h1 style=""color: #2563eb; margin-bottom: 24px;"">Approval needed to continue</h1>
+
+                <p>To proceed with delivering your shortlist, we need your approval to authorize payment.</p>
+
+                <p>This is a temporary authorization — you will only be charged once the shortlist is delivered.</p>
+
+                <p style=""margin-top: 32px;"">
+                    <a href=""{shortlistUrl}"" style=""background-color: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;"">Review &amp; approve</a>
+                </p>
+
+                <p style=""margin-top: 32px; color: #6b7280;"">— Bixo</p>
+            </body>
+            </html>";
+    }
+
     public async Task SendShortlistDeliveredEmailAsync(ShortlistDeliveredNotification notification)
     {
         try
@@ -195,8 +309,8 @@ public class EmailService : IEmailService
 
             var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
             var to = new EmailAddress(notification.Email);
-            var subject = $"Your shortlist is ready: {notification.RoleTitle}";
-            var htmlContent = BuildShortlistDeliveredEmailBody();
+            var subject = "Your shortlist has been delivered";
+            var htmlContent = BuildShortlistDeliveredEmailBody(notification.ShortlistUrl);
 
             var msg = MailHelper.CreateSingleEmail(from, to, subject, null, htmlContent);
 
@@ -204,7 +318,8 @@ public class EmailService : IEmailService
 
             if (response.IsSuccessStatusCode)
             {
-                _logger.LogInformation("Shortlist delivered email sent to: {Email}", notification.Email);
+                _logger.LogInformation("Shortlist delivered email sent to: {Email} for shortlist {ShortlistId}",
+                    notification.Email, notification.ShortlistId);
             }
             else
             {
@@ -218,29 +333,20 @@ public class EmailService : IEmailService
         }
     }
 
-    private static string BuildShortlistDeliveredEmailBody()
+    private static string BuildShortlistDeliveredEmailBody(string shortlistUrl)
     {
-        return @"
+        return $@"
             <html>
             <body style=""font-family: Arial, sans-serif; line-height: 1.8; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;"">
-                <h1 style=""color: #2563eb; margin-bottom: 24px;"">Your shortlist is ready</h1>
+                <h1 style=""color: #2563eb; margin-bottom: 24px;"">Your shortlist has been delivered</h1>
 
-                <p>Inside, you'll find:</p>
+                <p>Your shortlist is now available.</p>
 
-                <ul style=""padding-left: 20px;"">
-                    <li>A ranked list of curated candidates</li>
-                    <li>Full profiles and CVs</li>
-                    <li>Messaging enabled for this shortlist only</li>
-                </ul>
+                <p>You can view candidate profiles and contact details directly from your dashboard.</p>
 
-                <p style=""margin-top: 24px;"">This shortlist is a snapshot in time.<br />
-                If you request a follow-up later, previously delivered candidates will be excluded by default.</p>
-
-                <p style=""margin-top: 24px;""><strong>A note on responses:</strong><br />
-                These candidates are passive. Some may decline or not respond — that's expected.<br />
-                The value is access to relevant people, not guaranteed engagement.</p>
-
-                <p style=""margin-top: 24px;"">If you need adjustments or a follow-up request, just let us know.</p>
+                <p style=""margin-top: 32px;"">
+                    <a href=""{shortlistUrl}"" style=""background-color: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;"">View shortlist</a>
+                </p>
 
                 <p style=""margin-top: 32px; color: #6b7280;"">— Bixo</p>
             </body>
@@ -438,7 +544,6 @@ public class EmailService : IEmailService
                 <hr style=""border: 1px solid #e5e7eb;"" />
                 <p><strong>Name:</strong> {name}</p>
                 <p><strong>Email:</strong> {notification.Email}</p>
-                <p><strong>Candidate ID:</strong> {notification.CandidateId}</p>
                 <p><strong>Registered:</strong> {notification.CreatedAt:yyyy-MM-dd HH:mm:ss} UTC</p>
             </body>
             </html>";
@@ -492,7 +597,6 @@ public class EmailService : IEmailService
                 <p><strong>Company Name:</strong> {notification.CompanyName}</p>
                 <p><strong>Email:</strong> {notification.Email}</p>
                 <p><strong>Industry:</strong> {notification.Industry ?? "Not specified"}</p>
-                <p><strong>Company ID:</strong> {notification.CompanyId}</p>
                 <p><strong>Registered:</strong> {notification.CreatedAt:yyyy-MM-dd HH:mm:ss} UTC</p>
             </body>
             </html>";
@@ -533,6 +637,64 @@ public class EmailService : IEmailService
         }
     }
 
+    public async Task SendShortlistNoMatchEmailAsync(ShortlistNoMatchNotification notification)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_settings.ApiKey))
+            {
+                _logger.LogWarning("Email settings not configured, skipping shortlist no-match email");
+                return;
+            }
+
+            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
+            var to = new EmailAddress(notification.Email);
+            var subject = "Update on your shortlist request";
+            var htmlContent = BuildShortlistNoMatchEmailBody(notification.ShortlistUrl);
+
+            var msg = MailHelper.CreateSingleEmail(from, to, subject, null, htmlContent);
+
+            var response = await _client.SendEmailAsync(msg);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("Shortlist no-match email sent to: {Email} for shortlist {ShortlistId}",
+                    notification.Email, notification.ShortlistId);
+            }
+            else
+            {
+                var responseBody = await response.Body.ReadAsStringAsync();
+                _logger.LogError("SendGrid API returned {StatusCode}: {Body}", response.StatusCode, responseBody);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send shortlist no-match email to: {Email}", notification.Email);
+        }
+    }
+
+    private static string BuildShortlistNoMatchEmailBody(string shortlistUrl)
+    {
+        return $@"
+            <html>
+            <body style=""font-family: Arial, sans-serif; line-height: 1.8; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;"">
+                <h1 style=""color: #2563eb; margin-bottom: 24px;"">Update on your shortlist request</h1>
+
+                <p>We've reviewed your request and searched our current candidate pool, but we're not confident we can deliver a shortlist that meets the quality bar.</p>
+
+                <p style=""font-size: 16px; font-weight: 600; color: #059669;"">You will not be charged for this request.</p>
+
+                <p>You can review next steps from your dashboard.</p>
+
+                <p style=""margin-top: 32px;"">
+                    <a href=""{shortlistUrl}"" style=""background-color: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;"">View request</a>
+                </p>
+
+                <p style=""margin-top: 32px; color: #6b7280;"">— Bixo</p>
+            </body>
+            </html>";
+    }
+
     private static string BuildAdminNewShortlistEmailBody(AdminNewShortlistNotification notification)
     {
         var techStack = notification.TechStack.Count > 0
@@ -560,7 +722,6 @@ public class EmailService : IEmailService
                 <p><strong>Seniority:</strong> {notification.Seniority ?? "Not specified"}</p>
                 <p><strong>Location:</strong> {location}</p>
                 <p><strong>Tech Stack:</strong> {techStack}</p>
-                <p><strong>Shortlist ID:</strong> {notification.ShortlistId}</p>
                 <p><strong>Created:</strong> {notification.CreatedAt:yyyy-MM-dd HH:mm:ss} UTC</p>
                 {notes}
             </body>

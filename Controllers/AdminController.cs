@@ -229,9 +229,10 @@ public class AdminController : ControllerBase
                    s.status, s.price_paid, s.created_at, s.completed_at,
                    s.location_country, s.location_city, s.location_timezone,
                    s.previous_request_id, s.pricing_type, s.follow_up_discount,
-                   (SELECT COUNT(*) FROM shortlist_candidates WHERE shortlist_request_id = s.id) as candidates_count,
-                   (SELECT COUNT(*) FROM shortlist_candidates WHERE shortlist_request_id = s.id AND is_new = TRUE) as new_candidates_count,
-                   (SELECT COUNT(*) FROM shortlist_candidates WHERE shortlist_request_id = s.id AND is_new = FALSE) as repeated_candidates_count
+                   s.outcome, s.outcome_reason, s.outcome_decided_at, s.outcome_decided_by,
+                   (SELECT COUNT(*) FROM shortlist_candidates WHERE shortlist_request_id = s.id AND admin_approved = TRUE) as candidates_count,
+                   (SELECT COUNT(*) FROM shortlist_candidates WHERE shortlist_request_id = s.id AND admin_approved = TRUE AND is_new = TRUE) as new_candidates_count,
+                   (SELECT COUNT(*) FROM shortlist_candidates WHERE shortlist_request_id = s.id AND admin_approved = TRUE AND is_new = FALSE) as repeated_candidates_count
             FROM shortlist_requests s
             JOIN companies c ON c.id = s.company_id
             WHERE s.id = @Id",
@@ -282,12 +283,12 @@ public class AdminController : ControllerBase
             var chainItems = await connection.QueryAsync<dynamic>(@"
                 WITH RECURSIVE shortlist_chain AS (
                     SELECT id, role_title, created_at, previous_request_id,
-                           (SELECT COUNT(*) FROM shortlist_candidates WHERE shortlist_request_id = sr.id) as candidates_count
+                           (SELECT COUNT(*) FROM shortlist_candidates WHERE shortlist_request_id = sr.id AND admin_approved = TRUE) as candidates_count
                     FROM shortlist_requests sr
                     WHERE id = @PreviousId
                     UNION ALL
                     SELECT sr.id, sr.role_title, sr.created_at, sr.previous_request_id,
-                           (SELECT COUNT(*) FROM shortlist_candidates WHERE shortlist_request_id = sr.id) as candidates_count
+                           (SELECT COUNT(*) FROM shortlist_candidates WHERE shortlist_request_id = sr.id AND admin_approved = TRUE) as candidates_count
                     FROM shortlist_requests sr
                     JOIN shortlist_chain sc ON sr.id = sc.previous_request_id
                 )
@@ -356,6 +357,11 @@ public class AdminController : ControllerBase
             FollowUpDiscount = shortlist.follow_up_discount as decimal? ?? 0,
             NewCandidatesCount = (int)(shortlist.new_candidates_count ?? 0),
             RepeatedCandidatesCount = (int)(shortlist.repeated_candidates_count ?? 0),
+            // Outcome tracking
+            Outcome = (ShortlistOutcome)(int)(shortlist.outcome ?? 0),
+            OutcomeReason = shortlist.outcome_reason as string,
+            OutcomeDecidedAt = shortlist.outcome_decided_at as DateTime?,
+            OutcomeDecidedBy = shortlist.outcome_decided_by as Guid?,
             Candidates = candidates.Select(c =>
             {
                 var candidateId = (Guid)c.candidate_id;
@@ -397,7 +403,7 @@ public class AdminController : ControllerBase
 
         var sql = @"
             SELECT s.id, c.company_name, s.role_title, s.status, s.price_paid, s.created_at, s.completed_at,
-                   (SELECT COUNT(*) FROM shortlist_candidates WHERE shortlist_request_id = s.id) as candidates_count
+                   (SELECT COUNT(*) FROM shortlist_candidates WHERE shortlist_request_id = s.id AND admin_approved = TRUE) as candidates_count
             FROM shortlist_requests s
             JOIN companies c ON c.id = s.company_id";
 
@@ -570,6 +576,68 @@ public class AdminController : ControllerBase
         {
             await _shortlistService.MarkAsPaidAsync(id, GetAdminUserId(), request?.PaymentNote);
             return Ok(ApiResponse.Ok("Shortlist marked as paid and completed."));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(ApiResponse.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// Admin marks shortlist as having no suitable candidates.
+    /// Sets outcome to NoMatch, payment to not required, and closes the shortlist.
+    /// This is irreversible and company will not be charged.
+    /// </summary>
+    [HttpPost("shortlists/{id}/no-match")]
+    public async Task<ActionResult<ApiResponse>> MarkShortlistAsNoMatch(Guid id, [FromBody] MarkAsNoMatchRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Reason))
+        {
+            return BadRequest(ApiResponse.Fail("Reason is required"));
+        }
+
+        var result = await _shortlistService.MarkAsNoMatchAsync(id, GetAdminUserId(), request.Reason);
+
+        if (!result.Success)
+        {
+            return BadRequest(ApiResponse.Fail(result.ErrorMessage ?? "Failed to mark as no match"));
+        }
+
+        return Ok(ApiResponse.Ok("Shortlist marked as no match. Company will not be charged."));
+    }
+
+    /// <summary>
+    /// Get email history for a shortlist (shows all sent emails including resends).
+    /// </summary>
+    [HttpGet("shortlists/{id}/emails")]
+    public async Task<ActionResult<ApiResponse<List<ShortlistEmailHistoryResponse>>>> GetShortlistEmailHistory(Guid id)
+    {
+        var history = await _shortlistService.GetEmailHistoryAsync(id);
+
+        var response = history.Select(e => new ShortlistEmailHistoryResponse
+        {
+            Id = e.Id,
+            EmailEvent = e.EmailEvent.ToString(),
+            SentAt = e.SentAt,
+            SentTo = e.SentTo,
+            SentBy = e.SentBy,
+            IsResend = e.IsResend
+        }).ToList();
+
+        return Ok(ApiResponse<List<ShortlistEmailHistoryResponse>>.Ok(response));
+    }
+
+    /// <summary>
+    /// Resend the last email for a shortlist (admin only).
+    /// Creates a new record with is_resend = true.
+    /// </summary>
+    [HttpPost("shortlists/{id}/emails/resend")]
+    public async Task<ActionResult<ApiResponse>> ResendLastEmail(Guid id)
+    {
+        try
+        {
+            await _shortlistService.ResendLastEmailAsync(id, GetAdminUserId());
+            return Ok(ApiResponse.Ok("Email resent successfully."));
         }
         catch (InvalidOperationException ex)
         {
@@ -832,6 +900,13 @@ public class AdminShortlistDetailResponse
     public int NewCandidatesCount { get; set; }
     public int RepeatedCandidatesCount { get; set; }
     public bool IsFollowUp => PreviousRequestId.HasValue;
+
+    // Outcome tracking
+    public ShortlistOutcome Outcome { get; set; }
+    public string? OutcomeReason { get; set; }
+    public DateTime? OutcomeDecidedAt { get; set; }
+    public Guid? OutcomeDecidedBy { get; set; }
+
     public List<AdminShortlistCandidateResponse> Candidates { get; set; } = new();
     public List<ShortlistChainItem> Chain { get; set; } = new();
 }
@@ -949,6 +1024,12 @@ public class MarkAsPaidRequest
     public string? PaymentNote { get; set; }
 }
 
+public class MarkAsNoMatchRequest
+{
+    /// <summary>Required explanation for why no suitable candidates were found</summary>
+    public string Reason { get; set; } = string.Empty;
+}
+
 public class ProposeScopeRequest
 {
     /// <summary>Expected number of candidates (e.g. 5-10)</summary>
@@ -959,4 +1040,14 @@ public class ProposeScopeRequest
 
     /// <summary>Optional notes about the scope</summary>
     public string? Notes { get; set; }
+}
+
+public class ShortlistEmailHistoryResponse
+{
+    public Guid Id { get; set; }
+    public string EmailEvent { get; set; } = string.Empty;
+    public DateTime SentAt { get; set; }
+    public string SentTo { get; set; } = string.Empty;
+    public Guid? SentBy { get; set; }
+    public bool IsResend { get; set; }
 }

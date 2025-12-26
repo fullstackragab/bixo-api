@@ -213,7 +213,7 @@ public class PaymentService : IPaymentService
         return true;
     }
 
-    public async Task<PaymentFinalizationResult> FinalizePaymentAsync(Guid shortlistRequestId, ShortlistOutcome outcome)
+    public async Task<PaymentFinalizationResult> FinalizePaymentAsync(Guid shortlistRequestId, PaymentOutcome outcome)
     {
         using var connection = _db.CreateConnection();
 

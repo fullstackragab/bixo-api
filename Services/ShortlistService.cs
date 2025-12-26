@@ -1,12 +1,15 @@
 using System.Data;
 using System.Text.Json;
 using Dapper;
+using Microsoft.Extensions.Options;
+using bixo_api.Configuration;
 using bixo_api.Data;
 using bixo_api.Models.DTOs.Location;
 using bixo_api.Models.DTOs.Shortlist;
 using bixo_api.Models.Entities;
 using bixo_api.Models.Enums;
 using bixo_api.Services.Interfaces;
+using IDbConnection = System.Data.IDbConnection;
 
 namespace bixo_api.Services;
 
@@ -16,6 +19,7 @@ public class ShortlistService : IShortlistService
     private readonly IMatchingService _matchingService;
     private readonly IEmailService _emailService;
     private readonly IPaymentService _paymentService;
+    private readonly EmailSettings _emailSettings;
     private readonly ILogger<ShortlistService> _logger;
 
     // Similarity threshold for detecting follow-up shortlists (0-100)
@@ -32,12 +36,14 @@ public class ShortlistService : IShortlistService
         IMatchingService matchingService,
         IEmailService emailService,
         IPaymentService paymentService,
+        IOptions<EmailSettings> emailSettings,
         ILogger<ShortlistService> logger)
     {
         _db = db;
         _matchingService = matchingService;
         _emailService = emailService;
         _paymentService = paymentService;
+        _emailSettings = emailSettings.Value;
         _logger = logger;
     }
 
@@ -339,7 +345,8 @@ public class ShortlistService : IShortlistService
                    location_preference, is_remote, location_country, location_city, location_timezone,
                    additional_notes, status, price_paid, created_at, completed_at,
                    previous_request_id, pricing_type, follow_up_discount,
-                   proposed_price, proposed_candidates, scope_proposed_at, scope_approval_notes
+                   proposed_price, proposed_candidates, scope_proposed_at, scope_approval_notes,
+                   outcome, outcome_reason, outcome_decided_at
             FROM shortlist_requests
             WHERE id = @ShortlistId AND company_id = @CompanyId",
             new { ShortlistId = shortlistId, CompanyId = companyId });
@@ -447,7 +454,11 @@ public class ShortlistService : IShortlistService
             ProposedPrice = shortlist.proposed_price as decimal?,
             ProposedCandidates = shortlist.proposed_candidates as int?,
             ScopeProposedAt = shortlist.scope_proposed_at as DateTime?,
-            ScopeNotes = shortlist.scope_approval_notes as string
+            ScopeNotes = shortlist.scope_approval_notes as string,
+            // Outcome tracking
+            Outcome = (ShortlistOutcome)(int)(shortlist.outcome ?? 0),
+            OutcomeReason = shortlist.outcome_reason as string,
+            OutcomeDecidedAt = shortlist.outcome_decided_at as DateTime?
         };
     }
 
@@ -462,9 +473,10 @@ public class ShortlistService : IShortlistService
                    sr.price_paid, sr.created_at, sr.completed_at,
                    sr.previous_request_id, sr.pricing_type, sr.follow_up_discount,
                    sr.proposed_price, sr.proposed_candidates, sr.scope_proposed_at, sr.scope_approval_notes,
-                   COUNT(sc.id) as candidates_count,
-                   COUNT(CASE WHEN sc.is_new = TRUE THEN 1 END) as new_candidates_count,
-                   COUNT(CASE WHEN sc.is_new = FALSE THEN 1 END) as repeated_candidates_count
+                   sr.outcome, sr.outcome_reason, sr.outcome_decided_at,
+                   COUNT(CASE WHEN sc.admin_approved = TRUE THEN 1 END) as candidates_count,
+                   COUNT(CASE WHEN sc.admin_approved = TRUE AND sc.is_new = TRUE THEN 1 END) as new_candidates_count,
+                   COUNT(CASE WHEN sc.admin_approved = TRUE AND sc.is_new = FALSE THEN 1 END) as repeated_candidates_count
             FROM shortlist_requests sr
             LEFT JOIN shortlist_candidates sc ON sc.shortlist_request_id = sr.id
             WHERE sr.company_id = @CompanyId
@@ -473,7 +485,8 @@ public class ShortlistService : IShortlistService
                      sr.location_timezone, sr.additional_notes, sr.status,
                      sr.price_paid, sr.created_at, sr.completed_at,
                      sr.previous_request_id, sr.pricing_type, sr.follow_up_discount,
-                     sr.proposed_price, sr.proposed_candidates, sr.scope_proposed_at, sr.scope_approval_notes
+                     sr.proposed_price, sr.proposed_candidates, sr.scope_proposed_at, sr.scope_approval_notes,
+                     sr.outcome, sr.outcome_reason, sr.outcome_decided_at
             ORDER BY sr.created_at DESC",
             new { CompanyId = companyId });
 
@@ -510,7 +523,11 @@ public class ShortlistService : IShortlistService
                 ProposedPrice = s.proposed_price as decimal?,
                 ProposedCandidates = s.proposed_candidates as int?,
                 ScopeProposedAt = s.scope_proposed_at as DateTime?,
-                ScopeNotes = s.scope_approval_notes as string
+                ScopeNotes = s.scope_approval_notes as string,
+                // Outcome tracking
+                Outcome = (ShortlistOutcome)(int)(s.outcome ?? 0),
+                OutcomeReason = s.outcome_reason as string,
+                OutcomeDecidedAt = s.outcome_decided_at as DateTime?
             };
         }).ToList();
     }
@@ -689,7 +706,7 @@ public class ShortlistService : IShortlistService
 
         // Verify shortlist exists and is approved
         var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
-            SELECT sr.id, sr.status, sr.role_title, sr.company_id, sr.price_amount, sr.proposed_price,
+            SELECT sr.id, sr.status, sr.outcome, sr.role_title, sr.company_id, sr.price_amount, sr.proposed_price,
                    u.email as company_email
             FROM shortlist_requests sr
             LEFT JOIN companies c ON c.id = sr.company_id
@@ -706,6 +723,26 @@ public class ShortlistService : IShortlistService
             };
         }
 
+        // CRITICAL: Check outcome before allowing delivery
+        var outcome = (Models.Enums.ShortlistOutcome)(int)shortlist.outcome;
+        if (outcome == Models.Enums.ShortlistOutcome.NoMatch)
+        {
+            return new ShortlistDeliveryResult
+            {
+                Success = false,
+                ErrorMessage = "Cannot deliver shortlist with NoMatch outcome. This shortlist has been closed with no charge."
+            };
+        }
+
+        if (outcome == Models.Enums.ShortlistOutcome.Cancelled)
+        {
+            return new ShortlistDeliveryResult
+            {
+                Success = false,
+                ErrorMessage = "Cannot deliver cancelled shortlist"
+            };
+        }
+
         var currentStatus = (ShortlistStatus)(int)shortlist.status;
         if (currentStatus != ShortlistStatus.Approved)
         {
@@ -716,15 +753,18 @@ public class ShortlistService : IShortlistService
             };
         }
 
-        // Mark shortlist as Delivered (candidates now visible to company)
-        // Payment settlement happens out-of-band (manual), status stays pending
+        // Mark shortlist as Delivered with outcome
         var now = DateTime.UtcNow;
         await connection.ExecuteAsync(@"
             UPDATE shortlist_requests
             SET status = @Status,
                 delivered_at = @DeliveredAt,
                 delivered_by = @DeliveredBy,
-                payment_status = @PaymentStatus
+                payment_status = @PaymentStatus,
+                outcome = @Outcome,
+                outcome_reason = @OutcomeReason,
+                outcome_decided_at = @OutcomeDecidedAt,
+                outcome_decided_by = @OutcomeDecidedBy
             WHERE id = @ShortlistRequestId",
             new
             {
@@ -732,6 +772,10 @@ public class ShortlistService : IShortlistService
                 DeliveredAt = now,
                 DeliveredBy = request.AdminUserId,
                 PaymentStatus = (int)PaymentSettlementStatus.Pending,
+                Outcome = (int)Models.Enums.ShortlistOutcome.Delivered,
+                OutcomeReason = request.Notes ?? "Shortlist delivered successfully",
+                OutcomeDecidedAt = now,
+                OutcomeDecidedBy = request.AdminUserId,
                 ShortlistRequestId = shortlistRequestId
             });
 
@@ -739,20 +783,9 @@ public class ShortlistService : IShortlistService
             "Shortlist {ShortlistId} delivered at {DeliveredAt} by admin {AdminId}. Payment pending.",
             shortlistRequestId, now, request.AdminUserId);
 
-        // Send shortlist delivered email to company (fire and forget)
-        var companyEmail = shortlist.company_email as string;
-        var roleTitle = shortlist.role_title as string;
+        // Send Delivered email to company (idempotent - only sends once)
         var companyId = (Guid)shortlist.company_id;
-        if (!string.IsNullOrEmpty(companyEmail))
-        {
-            _ = _emailService.SendShortlistDeliveredEmailAsync(new ShortlistDeliveredNotification
-            {
-                Email = companyEmail,
-                RoleTitle = roleTitle ?? "Your role",
-                CandidatesCount = request.CandidatesDelivered,
-                ShortlistId = shortlistRequestId
-            });
-        }
+        _ = TrySendEmailEventAsync(shortlistRequestId, ShortlistEmailEvent.Delivered);
 
         // Send system message to all approved candidates
         await SendShortlistedSystemMessagesAsync(connection, shortlistRequestId, companyId);
@@ -857,7 +890,7 @@ public class ShortlistService : IShortlistService
 
         if (paymentStatus != PaymentSettlementStatus.Paid)
         {
-            throw new InvalidOperationException($"Cannot complete: payment must be confirmed (current: {paymentStatus})");
+            throw new InvalidOperationException($"Cannot complete: payment must be confirmed (current: {currentStatus})");
         }
 
         await connection.ExecuteAsync(@"
@@ -961,7 +994,8 @@ Declining will not affect your visibility for future opportunities.";
                 Id = shortlistRequestId
             });
 
-        // TODO: Send email to company notifying of scope proposal
+        // Send PricingReady email to company (idempotent - only sends once)
+        _ = TrySendEmailEventAsync(shortlistRequestId, ShortlistEmailEvent.PricingReady);
 
         return new ScopeProposalResult { Success = true };
     }
@@ -1214,6 +1248,326 @@ Declining will not affect your visibility for future opportunities.";
             ProposedAt = (DateTime)(p.scope_proposed_at ?? DateTime.MinValue),
             Notes = p.scope_approval_notes as string
         }).ToList();
+    }
+
+    // === Manual Payment Settlement ===
+
+    /// <summary>
+    /// Admin marks shortlist as having no suitable candidates.
+    /// Sets outcome to NoMatch, payment_status to NotRequired, and closes the shortlist.
+    /// This is irreversible - company will not be charged.
+    /// </summary>
+    public async Task<NoMatchResult> MarkAsNoMatchAsync(Guid shortlistRequestId, Guid adminUserId, string reason)
+    {
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            return new NoMatchResult
+            {
+                Success = false,
+                ErrorMessage = "Outcome reason is required when marking as no match"
+            };
+        }
+
+        using var connection = _db.CreateConnection();
+
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT sr.id, sr.status, sr.outcome, sr.role_title, sr.company_id,
+                   u.email as company_email, c.company_name
+            FROM shortlist_requests sr
+            LEFT JOIN companies c ON c.id = sr.company_id
+            LEFT JOIN users u ON u.id = c.user_id
+            WHERE sr.id = @ShortlistRequestId",
+            new { ShortlistRequestId = shortlistRequestId });
+
+        if (shortlist == null)
+        {
+            return new NoMatchResult
+            {
+                Success = false,
+                ErrorMessage = "Shortlist not found"
+            };
+        }
+
+        var currentOutcome = (Models.Enums.ShortlistOutcome)(int)shortlist.outcome;
+        var currentStatus = (ShortlistStatus)(int)shortlist.status;
+
+        // Cannot mark as no-match if already delivered
+        if (currentStatus == ShortlistStatus.Delivered || currentStatus == ShortlistStatus.Completed)
+        {
+            return new NoMatchResult
+            {
+                Success = false,
+                ErrorMessage = $"Cannot mark as no match: shortlist has already been delivered (status: {currentStatus})"
+            };
+        }
+
+        // Validate outcome transition
+        try
+        {
+            ShortlistOutcomeTransitions.ValidateTransition(currentOutcome, Models.Enums.ShortlistOutcome.NoMatch);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return new NoMatchResult
+            {
+                Success = false,
+                ErrorMessage = ex.Message
+            };
+        }
+
+        var now = DateTime.UtcNow;
+
+        // Set outcome to NoMatch and mark payment as not required
+        await connection.ExecuteAsync(@"
+            UPDATE shortlist_requests
+            SET outcome = @Outcome,
+                outcome_reason = @OutcomeReason,
+                outcome_decided_at = @OutcomeDecidedAt,
+                outcome_decided_by = @OutcomeDecidedBy,
+                payment_status = @PaymentStatus,
+                status = @Status
+            WHERE id = @ShortlistRequestId",
+            new
+            {
+                Outcome = (int)Models.Enums.ShortlistOutcome.NoMatch,
+                OutcomeReason = reason,
+                OutcomeDecidedAt = now,
+                OutcomeDecidedBy = adminUserId,
+                PaymentStatus = (int)PaymentSettlementStatus.NotRequired,
+                Status = (int)ShortlistStatus.Cancelled,
+                ShortlistRequestId = shortlistRequestId
+            });
+
+        _logger.LogInformation(
+            "Shortlist {ShortlistId} marked as NoMatch by admin {AdminId}. Reason: {Reason}",
+            shortlistRequestId, adminUserId, reason);
+
+        // Send NoMatch email to company (idempotent - only sends once)
+        _ = TrySendEmailEventAsync(shortlistRequestId, ShortlistEmailEvent.NoMatch);
+
+        return new NoMatchResult
+        {
+            Success = true
+        };
+    }
+
+    // === Email Event Tracking ===
+
+    public async Task<bool> TrySendEmailEventAsync(Guid shortlistRequestId, ShortlistEmailEvent emailEvent)
+    {
+        using var connection = _db.CreateConnection();
+
+        // Check if email was already sent for this event
+        var alreadySent = await connection.ExecuteScalarAsync<bool>(@"
+            SELECT EXISTS(
+                SELECT 1 FROM shortlist_emails
+                WHERE shortlist_request_id = @ShortlistRequestId
+                  AND email_event = @EmailEvent
+                  AND is_resend = FALSE
+            )",
+            new { ShortlistRequestId = shortlistRequestId, EmailEvent = (int)emailEvent });
+
+        if (alreadySent)
+        {
+            _logger.LogInformation(
+                "Email event {EmailEvent} already sent for shortlist {ShortlistId}, skipping",
+                emailEvent, shortlistRequestId);
+            return false;
+        }
+
+        // Get shortlist and company info for email
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT sr.id, sr.role_title, sr.outcome_reason, c.id as company_id, c.company_name, u.email as company_email
+            FROM shortlist_requests sr
+            JOIN companies c ON c.id = sr.company_id
+            JOIN users u ON u.id = c.user_id
+            WHERE sr.id = @ShortlistRequestId",
+            new { ShortlistRequestId = shortlistRequestId });
+
+        if (shortlist == null)
+        {
+            _logger.LogWarning("Shortlist {ShortlistId} not found for email event", shortlistRequestId);
+            return false;
+        }
+
+        var companyEmail = (string)shortlist.company_email;
+        var companyName = shortlist.company_name as string ?? "";
+        var roleTitle = (string)shortlist.role_title;
+        var outcomeReason = shortlist.outcome_reason as string ?? "";
+        var shortlistUrl = $"{_emailSettings.FrontendUrl}/company/shortlists/{shortlistRequestId}";
+
+        // Send the appropriate email
+        try
+        {
+            await SendEmailForEventAsync(emailEvent, companyEmail, roleTitle, shortlistRequestId, shortlistUrl, companyName, outcomeReason);
+
+            // Record that email was sent
+            await connection.ExecuteAsync(@"
+                INSERT INTO shortlist_emails (id, shortlist_request_id, email_event, sent_at, sent_to, is_resend)
+                VALUES (@Id, @ShortlistRequestId, @EmailEvent, @SentAt, @SentTo, FALSE)",
+                new
+                {
+                    Id = Guid.NewGuid(),
+                    ShortlistRequestId = shortlistRequestId,
+                    EmailEvent = (int)emailEvent,
+                    SentAt = DateTime.UtcNow,
+                    SentTo = companyEmail
+                });
+
+            _logger.LogInformation(
+                "Email event {EmailEvent} sent for shortlist {ShortlistId} to {Email}",
+                emailEvent, shortlistRequestId, companyEmail);
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to send email event {EmailEvent} for shortlist {ShortlistId}",
+                emailEvent, shortlistRequestId);
+            return false;
+        }
+    }
+
+    public async Task ResendLastEmailAsync(Guid shortlistRequestId, Guid adminUserId)
+    {
+        using var connection = _db.CreateConnection();
+
+        // Get the last email sent for this shortlist
+        var lastEmail = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT email_event, sent_to
+            FROM shortlist_emails
+            WHERE shortlist_request_id = @ShortlistRequestId
+            ORDER BY sent_at DESC
+            LIMIT 1",
+            new { ShortlistRequestId = shortlistRequestId });
+
+        if (lastEmail == null)
+        {
+            throw new InvalidOperationException("No emails have been sent for this shortlist");
+        }
+
+        var emailEvent = (ShortlistEmailEvent)(int)lastEmail.email_event;
+        var sentTo = (string)lastEmail.sent_to;
+
+        // Get shortlist info (including fields needed for NoMatch emails)
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT sr.role_title, sr.outcome_reason, c.company_name
+            FROM shortlist_requests sr
+            JOIN companies c ON c.id = sr.company_id
+            WHERE sr.id = @ShortlistRequestId",
+            new { ShortlistRequestId = shortlistRequestId });
+
+        if (shortlist == null)
+        {
+            throw new InvalidOperationException("Shortlist not found");
+        }
+
+        var roleTitle = (string)shortlist.role_title;
+        var companyName = shortlist.company_name as string ?? "";
+        var outcomeReason = shortlist.outcome_reason as string ?? "";
+        var shortlistUrl = $"{_emailSettings.FrontendUrl}/company/shortlists/{shortlistRequestId}";
+
+        // Send the email
+        await SendEmailForEventAsync(emailEvent, sentTo, roleTitle, shortlistRequestId, shortlistUrl, companyName, outcomeReason);
+
+        // Record the resend
+        await connection.ExecuteAsync(@"
+            INSERT INTO shortlist_emails (id, shortlist_request_id, email_event, sent_at, sent_to, sent_by, is_resend)
+            VALUES (@Id, @ShortlistRequestId, @EmailEvent, @SentAt, @SentTo, @SentBy, TRUE)",
+            new
+            {
+                Id = Guid.NewGuid(),
+                ShortlistRequestId = shortlistRequestId,
+                EmailEvent = (int)emailEvent,
+                SentAt = DateTime.UtcNow,
+                SentTo = sentTo,
+                SentBy = adminUserId
+            });
+
+        _logger.LogInformation(
+            "Admin {AdminId} resent email event {EmailEvent} for shortlist {ShortlistId}",
+            adminUserId, emailEvent, shortlistRequestId);
+    }
+
+    public async Task<List<ShortlistEmailRecord>> GetEmailHistoryAsync(Guid shortlistRequestId)
+    {
+        using var connection = _db.CreateConnection();
+
+        var emails = await connection.QueryAsync<dynamic>(@"
+            SELECT id, email_event, sent_at, sent_to, sent_by, is_resend
+            FROM shortlist_emails
+            WHERE shortlist_request_id = @ShortlistRequestId
+            ORDER BY sent_at DESC",
+            new { ShortlistRequestId = shortlistRequestId });
+
+        return emails.Select(e => new ShortlistEmailRecord
+        {
+            Id = (Guid)e.id,
+            EmailEvent = (ShortlistEmailEvent)(int)e.email_event,
+            SentAt = (DateTime)e.sent_at,
+            SentTo = (string)e.sent_to,
+            SentBy = e.sent_by as Guid?,
+            IsResend = (bool)e.is_resend
+        }).ToList();
+    }
+
+    private async Task SendEmailForEventAsync(
+        ShortlistEmailEvent emailEvent,
+        string email,
+        string roleTitle,
+        Guid shortlistId,
+        string shortlistUrl,
+        string companyName = "",
+        string outcomeReason = "")
+    {
+        switch (emailEvent)
+        {
+            case ShortlistEmailEvent.PricingReady:
+                await _emailService.SendShortlistPricingReadyEmailAsync(new ShortlistPricingReadyNotification
+                {
+                    Email = email,
+                    RoleTitle = roleTitle,
+                    ShortlistId = shortlistId,
+                    ShortlistUrl = shortlistUrl
+                });
+                break;
+
+            case ShortlistEmailEvent.AuthorizationRequired:
+                await _emailService.SendShortlistAuthorizationRequiredEmailAsync(new ShortlistAuthorizationRequiredNotification
+                {
+                    Email = email,
+                    RoleTitle = roleTitle,
+                    ShortlistId = shortlistId,
+                    ShortlistUrl = shortlistUrl
+                });
+                break;
+
+            case ShortlistEmailEvent.Delivered:
+                await _emailService.SendShortlistDeliveredEmailAsync(new ShortlistDeliveredNotification
+                {
+                    Email = email,
+                    RoleTitle = roleTitle,
+                    ShortlistId = shortlistId,
+                    ShortlistUrl = shortlistUrl
+                });
+                break;
+
+            case ShortlistEmailEvent.NoMatch:
+                await _emailService.SendShortlistNoMatchEmailAsync(new ShortlistNoMatchNotification
+                {
+                    Email = email,
+                    CompanyName = companyName,
+                    RoleTitle = roleTitle,
+                    Reason = outcomeReason,
+                    ShortlistId = shortlistId,
+                    ShortlistUrl = shortlistUrl
+                });
+                break;
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(emailEvent), emailEvent, "Unknown email event type");
+        }
     }
 
     private List<string> ParseTechStack(string? techStackJson)

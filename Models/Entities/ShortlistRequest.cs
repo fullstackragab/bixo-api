@@ -37,6 +37,12 @@ public class ShortlistRequest
     // Discount applied for follow-up shortlists
     public decimal FollowUpDiscount { get; set; } = 0;
 
+    // Outcome tracking - determines final disposition and payment
+    public ShortlistOutcome Outcome { get; set; } = ShortlistOutcome.Pending;
+    public string? OutcomeReason { get; set; }
+    public DateTime? OutcomeDecidedAt { get; set; }
+    public Guid? OutcomeDecidedBy { get; set; }
+
     // Navigation
     public Company Company { get; set; } = null!;
     public ShortlistRequest? PreviousRequest { get; set; }
