@@ -23,6 +23,14 @@ public interface IEmailService
 
     /// <summary>Sent when no suitable candidates found</summary>
     Task SendShortlistNoMatchEmailAsync(ShortlistNoMatchNotification notification);
+
+    // === Recommendation Emails ===
+
+    /// <summary>Sent to recommender when candidate requests a recommendation</summary>
+    Task SendRecommendationRequestEmailAsync(RecommendationRequestNotification notification);
+
+    /// <summary>Sent to candidate when a recommendation is submitted</summary>
+    Task SendRecommendationReceivedEmailAsync(RecommendationReceivedNotification notification);
 }
 
 public class SupportNotification
@@ -121,4 +129,21 @@ public class AdminNewShortlistNotification
     public bool IsRemote { get; set; }
     public string? AdditionalNotes { get; set; }
     public DateTime CreatedAt { get; set; }
+}
+
+/// <summary>Sent to recommender when candidate requests a recommendation</summary>
+public class RecommendationRequestNotification
+{
+    public string Email { get; set; } = string.Empty;
+    public string RecommenderName { get; set; } = string.Empty;
+    public string CandidateName { get; set; } = string.Empty;
+    public string RecommendationUrl { get; set; } = string.Empty;
+}
+
+/// <summary>Sent to candidate when a recommendation is submitted</summary>
+public class RecommendationReceivedNotification
+{
+    public string Email { get; set; } = string.Empty;
+    public string CandidateFirstName { get; set; } = string.Empty;
+    public string RecommenderName { get; set; } = string.Empty;
 }

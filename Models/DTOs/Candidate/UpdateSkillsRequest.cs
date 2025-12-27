@@ -14,4 +14,5 @@ public class SkillUpdateItem
     public SkillCategory Category { get; set; }
     public bool IsVerified { get; set; }
     public bool Delete { get; set; }
+    public SkillLevel SkillLevel { get; set; } = SkillLevel.Secondary;
 }

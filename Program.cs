@@ -31,6 +31,7 @@ builder.Services.AddScoped<ICvParsingService, CvParsingService>();
 builder.Services.AddScoped<IShortlistService, ShortlistService>();
 builder.Services.AddScoped<IMatchingService, MatchingService>();
 builder.Services.AddScoped<IMessageService, MessageService>();
+builder.Services.AddScoped<IRecommendationService, RecommendationService>();
 
 // Payment providers
 builder.Services.AddHttpClient("PayPal");

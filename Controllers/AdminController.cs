@@ -3,7 +3,9 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using bixo_api.Data;
 using bixo_api.Models.DTOs.Common;
+using bixo_api.Models.DTOs.Recommendation;
 using bixo_api.Models.Enums;
+using bixo_api.Services;
 using bixo_api.Services.Interfaces;
 
 namespace bixo_api.Controllers;
@@ -15,11 +17,19 @@ public class AdminController : ControllerBase
 {
     private readonly IDbConnectionFactory _db;
     private readonly IShortlistService _shortlistService;
+    private readonly IRecommendationService _recommendationService;
+    private readonly IS3StorageService _s3Service;
 
-    public AdminController(IDbConnectionFactory db, IShortlistService shortlistService)
+    public AdminController(
+        IDbConnectionFactory db,
+        IShortlistService shortlistService,
+        IRecommendationService recommendationService,
+        IS3StorageService s3Service)
     {
         _db = db;
         _shortlistService = shortlistService;
+        _recommendationService = recommendationService;
+        _s3Service = s3Service;
     }
 
     [HttpGet("dashboard")]
@@ -72,6 +82,7 @@ public class AdminController : ControllerBase
         var sql = $@"
             SELECT c.id, c.user_id, u.email, c.first_name, c.last_name, c.desired_role,
                    c.availability, c.seniority_estimate, c.profile_visible, c.created_at, u.last_active_at,
+                   c.cv_file_key, c.cv_original_file_name,
                    (SELECT COUNT(*) FROM candidate_skills WHERE candidate_id = c.id) as skills_count,
                    (SELECT COUNT(*) FROM candidate_profile_views WHERE candidate_id = c.id) as profile_views_count
             FROM candidates c
@@ -94,6 +105,8 @@ public class AdminController : ControllerBase
             Availability = (Availability)(c.availability ?? 0),
             SeniorityEstimate = c.seniority_estimate != null ? (SeniorityLevel?)(int)c.seniority_estimate : null,
             ProfileVisible = (bool)c.profile_visible,
+            HasCv = !string.IsNullOrEmpty(c.cv_file_key as string),
+            CvFileName = c.cv_original_file_name as string,
             SkillsCount = (int)(c.skills_count ?? 0),
             ProfileViewsCount = (int)(c.profile_views_count ?? 0),
             CreatedAt = (DateTime)c.created_at,
@@ -112,6 +125,139 @@ public class AdminController : ControllerBase
         return Ok(ApiResponse<AdminCandidatePagedResponse>.Ok(result));
     }
 
+    [HttpGet("candidates/{id}")]
+    public async Task<ActionResult<ApiResponse<AdminCandidateDetailResponse>>> GetCandidate(Guid id)
+    {
+        using var connection = _db.CreateConnection();
+
+        var candidate = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT c.id, c.user_id, u.email, c.first_name, c.last_name, c.linkedin_url,
+                   c.desired_role, c.location_preference, c.remote_preference,
+                   c.availability, c.seniority_estimate, c.profile_visible, c.open_to_opportunities,
+                   c.cv_file_key, c.cv_original_file_name,
+                   c.created_at, c.updated_at, u.last_active_at,
+                   cl.country AS location_country, cl.city AS location_city,
+                   cl.timezone AS location_timezone, cl.willing_to_relocate
+            FROM candidates c
+            JOIN users u ON u.id = c.user_id
+            LEFT JOIN candidate_locations cl ON cl.candidate_id = c.id
+            WHERE c.id = @Id",
+            new { Id = id });
+
+        if (candidate == null)
+        {
+            return NotFound(ApiResponse<AdminCandidateDetailResponse>.Fail("Candidate not found"));
+        }
+
+        var skills = await connection.QueryAsync<dynamic>(@"
+            SELECT id, skill_name, confidence_score, category, is_verified, skill_level
+            FROM candidate_skills
+            WHERE candidate_id = @CandidateId
+            ORDER BY skill_level ASC, confidence_score DESC",
+            new { CandidateId = id });
+
+        var recommendations = await connection.QueryAsync<dynamic>(@"
+            SELECT id, recommender_name, recommender_email, relationship,
+                   CASE WHEN is_submitted THEN 'submitted' ELSE 'pending' END as status,
+                   is_approved_by_candidate, is_admin_approved as admin_approved, created_at, submitted_at
+            FROM recommendations
+            WHERE candidate_id = @CandidateId
+            ORDER BY created_at DESC",
+            new { CandidateId = id });
+
+        var result = new AdminCandidateDetailResponse
+        {
+            Id = (Guid)candidate.id,
+            UserId = (Guid)candidate.user_id,
+            Email = (string)candidate.email,
+            FirstName = candidate.first_name as string,
+            LastName = candidate.last_name as string,
+            LinkedInUrl = candidate.linkedin_url as string,
+            DesiredRole = candidate.desired_role as string,
+            LocationPreference = candidate.location_preference as string,
+            RemotePreference = candidate.remote_preference != null ? (RemotePreference?)(int)candidate.remote_preference : null,
+            Availability = (Availability)(candidate.availability ?? 0),
+            SeniorityEstimate = candidate.seniority_estimate != null ? (SeniorityLevel?)(int)candidate.seniority_estimate : null,
+            ProfileVisible = (bool)candidate.profile_visible,
+            OpenToOpportunities = (bool)candidate.open_to_opportunities,
+            HasCv = !string.IsNullOrEmpty(candidate.cv_file_key as string),
+            CvFileName = candidate.cv_original_file_name as string,
+            Location = new AdminCandidateLocationResponse
+            {
+                Country = candidate.location_country as string,
+                City = candidate.location_city as string,
+                Timezone = candidate.location_timezone as string,
+                WillingToRelocate = candidate.willing_to_relocate as bool? ?? false
+            },
+            Skills = skills.Select(s => new AdminCandidateSkillResponse
+            {
+                Id = (Guid)s.id,
+                SkillName = (string)s.skill_name,
+                ConfidenceScore = (double)(decimal)s.confidence_score,
+                Category = (SkillCategory)(int)s.category,
+                IsVerified = (bool)s.is_verified,
+                SkillLevel = (SkillLevel)(int)(s.skill_level ?? 1)
+            }).ToList(),
+            Recommendations = recommendations.Select(r => new AdminCandidateRecommendationResponse
+            {
+                Id = (Guid)r.id,
+                RecommenderName = (string)r.recommender_name,
+                RecommenderEmail = (string)r.recommender_email,
+                Relationship = (string)r.relationship,
+                Status = (string)r.status,
+                IsApprovedByCandidate = (bool)r.is_approved_by_candidate,
+                AdminApproved = r.admin_approved as bool?,
+                CreatedAt = (DateTime)r.created_at,
+                SubmittedAt = r.submitted_at as DateTime?
+            }).ToList(),
+            CreatedAt = (DateTime)candidate.created_at,
+            UpdatedAt = candidate.updated_at as DateTime?,
+            LastActiveAt = (DateTime)candidate.last_active_at
+        };
+
+        return Ok(ApiResponse<AdminCandidateDetailResponse>.Ok(result));
+    }
+
+    [HttpGet("candidates/{id}/recommendations")]
+    public async Task<ActionResult<ApiResponse<List<AdminCandidateRecommendationResponse>>>> GetCandidateRecommendations(Guid id)
+    {
+        using var connection = _db.CreateConnection();
+
+        // Check candidate exists
+        var exists = await connection.ExecuteScalarAsync<bool>(
+            "SELECT EXISTS(SELECT 1 FROM candidates WHERE id = @Id)",
+            new { Id = id });
+
+        if (!exists)
+        {
+            return NotFound(ApiResponse<List<AdminCandidateRecommendationResponse>>.Fail("Candidate not found"));
+        }
+
+        var recommendations = await connection.QueryAsync<dynamic>(@"
+            SELECT id, recommender_name, recommender_email, relationship,
+                   CASE WHEN is_submitted THEN 'submitted' ELSE 'pending' END as status,
+                   is_approved_by_candidate, is_admin_approved as admin_approved, created_at, submitted_at
+            FROM recommendations
+            WHERE candidate_id = @CandidateId
+            ORDER BY created_at DESC",
+            new { CandidateId = id });
+
+        var result = recommendations.Select(r => new AdminCandidateRecommendationResponse
+        {
+            Id = (Guid)r.id,
+            RecommenderName = (string)r.recommender_name,
+            RecommenderEmail = (string)r.recommender_email,
+            Relationship = (string)r.relationship,
+            Status = (string)r.status,
+            IsApprovedByCandidate = (bool)r.is_approved_by_candidate,
+            AdminApproved = r.admin_approved as bool?,
+            CreatedAt = (DateTime)r.created_at,
+            SubmittedAt = r.submitted_at as DateTime?
+        }).ToList();
+
+        return Ok(ApiResponse<List<AdminCandidateRecommendationResponse>>.Ok(result));
+    }
+
     [HttpPut("candidates/{id}/visibility")]
     public async Task<ActionResult<ApiResponse>> SetCandidateVisibility(Guid id, [FromBody] AdminSetVisibilityRequest request)
     {
@@ -127,6 +273,102 @@ public class AdminController : ControllerBase
         }
 
         return Ok(ApiResponse.Ok("Visibility updated"));
+    }
+
+    /// <summary>
+    /// Approve a candidate after CV review. Sets profile_visible = true.
+    /// </summary>
+    [HttpPost("candidates/{id}/approve")]
+    public async Task<ActionResult<ApiResponse>> ApproveCandidate(Guid id)
+    {
+        using var connection = _db.CreateConnection();
+
+        // Check candidate exists and has CV
+        var candidate = await connection.QueryFirstOrDefaultAsync<dynamic>(
+            "SELECT cv_file_key FROM candidates WHERE id = @Id",
+            new { Id = id });
+
+        if (candidate == null)
+        {
+            return NotFound(ApiResponse.Fail("Candidate not found"));
+        }
+
+        if (string.IsNullOrEmpty(candidate.cv_file_key as string))
+        {
+            return BadRequest(ApiResponse.Fail("Cannot approve candidate without CV"));
+        }
+
+        await connection.ExecuteAsync(
+            "UPDATE candidates SET profile_visible = TRUE, updated_at = @Now WHERE id = @Id",
+            new { Now = DateTime.UtcNow, Id = id });
+
+        return Ok(ApiResponse.Ok("Candidate approved and now visible for matching"));
+    }
+
+    /// <summary>
+    /// Reject/hide a candidate. Sets profile_visible = false.
+    /// </summary>
+    [HttpPost("candidates/{id}/reject")]
+    public async Task<ActionResult<ApiResponse>> RejectCandidate(Guid id)
+    {
+        using var connection = _db.CreateConnection();
+
+        var rowsAffected = await connection.ExecuteAsync(
+            "UPDATE candidates SET profile_visible = FALSE, updated_at = @Now WHERE id = @Id",
+            new { Now = DateTime.UtcNow, Id = id });
+
+        if (rowsAffected == 0)
+        {
+            return NotFound(ApiResponse.Fail("Candidate not found"));
+        }
+
+        return Ok(ApiResponse.Ok("Candidate rejected and hidden from matching"));
+    }
+
+    [HttpPut("candidates/{id}/seniority")]
+    public async Task<ActionResult<ApiResponse>> SetCandidateSeniority(Guid id, [FromBody] AdminSetSeniorityRequest request)
+    {
+        using var connection = _db.CreateConnection();
+
+        var rowsAffected = await connection.ExecuteAsync(
+            "UPDATE candidates SET seniority_estimate = @Seniority, updated_at = @Now WHERE id = @Id",
+            new { Seniority = (int)request.Seniority, Now = DateTime.UtcNow, Id = id });
+
+        if (rowsAffected == 0)
+        {
+            return NotFound(ApiResponse.Fail("Candidate not found"));
+        }
+
+        return Ok(ApiResponse.Ok("Seniority updated"));
+    }
+
+    [HttpGet("candidates/{id}/cv")]
+    public async Task<ActionResult<ApiResponse<AdminCvDownloadResponse>>> GetCandidateCv(Guid id)
+    {
+        using var connection = _db.CreateConnection();
+
+        var candidate = await connection.QueryFirstOrDefaultAsync<dynamic>(
+            "SELECT cv_file_key, cv_original_file_name FROM candidates WHERE id = @Id",
+            new { Id = id });
+
+        if (candidate == null)
+        {
+            return NotFound(ApiResponse<AdminCvDownloadResponse>.Fail("Candidate not found"));
+        }
+
+        var cvFileKey = candidate.cv_file_key as string;
+        if (string.IsNullOrEmpty(cvFileKey))
+        {
+            return NotFound(ApiResponse<AdminCvDownloadResponse>.Fail("Candidate has no CV uploaded"));
+        }
+
+        var downloadUrl = await _s3Service.GeneratePresignedDownloadUrlAsync(cvFileKey);
+
+        return Ok(ApiResponse<AdminCvDownloadResponse>.Ok(new AdminCvDownloadResponse
+        {
+            DownloadUrl = downloadUrl,
+            FileName = candidate.cv_original_file_name as string ?? "cv.pdf"
+        }));
     }
 
     [HttpGet("companies")]
@@ -772,6 +1014,57 @@ public class AdminController : ControllerBase
 
         return Ok(ApiResponse.Ok("Status updated"));
     }
+
+    // === Recommendation Admin Endpoints ===
+
+    /// <summary>
+    /// Get all recommendations pending admin review.
+    /// Only shows recommendations that are submitted, candidate-approved, but not yet admin-approved.
+    /// </summary>
+    [HttpGet("recommendations")]
+    public async Task<ActionResult<ApiResponse<List<AdminRecommendationResponse>>>> GetPendingRecommendations()
+    {
+        var recommendations = await _recommendationService.GetPendingRecommendationsAsync();
+        return Ok(ApiResponse<List<AdminRecommendationResponse>>.Ok(recommendations));
+    }
+
+    /// <summary>
+    /// Approve a recommendation. Makes it visible to companies in shortlists.
+    /// </summary>
+    [HttpPost("recommendations/{id}/approve")]
+    public async Task<ActionResult<ApiResponse>> ApproveRecommendation(Guid id)
+    {
+        var success = await _recommendationService.AdminApproveRecommendationAsync(id, GetAdminUserId());
+
+        if (!success)
+        {
+            return BadRequest(ApiResponse.Fail("Failed to approve recommendation. It may not exist or is not pending review."));
+        }
+
+        return Ok(ApiResponse.Ok("Recommendation approved and now visible to companies."));
+    }
+
+    /// <summary>
+    /// Reject a recommendation. It will never be visible to companies.
+    /// Reasons could include: low quality, exaggerated claims, unprofessional language.
+    /// </summary>
+    [HttpPost("recommendations/{id}/reject")]
+    public async Task<ActionResult<ApiResponse>> RejectRecommendation(Guid id, [FromBody] RejectRecommendationAdminRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Reason))
+        {
+            return BadRequest(ApiResponse.Fail("Rejection reason is required"));
+        }
+
+        var success = await _recommendationService.AdminRejectRecommendationAsync(id, request.Reason);
+
+        if (!success)
+        {
+            return BadRequest(ApiResponse.Fail("Failed to reject recommendation. It may not exist or is not pending review."));
+        }
+
+        return Ok(ApiResponse.Ok("Recommendation rejected."));
+    }
 }
 
 public class AdminDashboardResponse
@@ -796,6 +1089,8 @@ public class AdminCandidateResponse
     public Availability Availability { get; set; }
     public SeniorityLevel? SeniorityEstimate { get; set; }
     public bool ProfileVisible { get; set; }
+    public bool HasCv { get; set; }
+    public string? CvFileName { get; set; }
     public int SkillsCount { get; set; }
     public int ProfileViewsCount { get; set; }
     public DateTime CreatedAt { get; set; }
@@ -809,6 +1104,62 @@ public class AdminCandidatePagedResponse
     public int Page { get; set; }
     public int PageSize { get; set; }
     public int TotalPages { get; set; }
+}
+
+public class AdminCandidateDetailResponse
+{
+    public Guid Id { get; set; }
+    public Guid UserId { get; set; }
+    public string Email { get; set; } = string.Empty;
+    public string? FirstName { get; set; }
+    public string? LastName { get; set; }
+    public string? LinkedInUrl { get; set; }
+    public string? DesiredRole { get; set; }
+    public string? LocationPreference { get; set; }
+    public RemotePreference? RemotePreference { get; set; }
+    public Availability Availability { get; set; }
+    public SeniorityLevel? SeniorityEstimate { get; set; }
+    public bool ProfileVisible { get; set; }
+    public bool OpenToOpportunities { get; set; }
+    public bool HasCv { get; set; }
+    public string? CvFileName { get; set; }
+    public AdminCandidateLocationResponse? Location { get; set; }
+    public List<AdminCandidateSkillResponse> Skills { get; set; } = new();
+    public List<AdminCandidateRecommendationResponse> Recommendations { get; set; } = new();
+    public DateTime CreatedAt { get; set; }
+    public DateTime? UpdatedAt { get; set; }
+    public DateTime LastActiveAt { get; set; }
+}
+
+public class AdminCandidateLocationResponse
+{
+    public string? Country { get; set; }
+    public string? City { get; set; }
+    public string? Timezone { get; set; }
+    public bool WillingToRelocate { get; set; }
+}
+
+public class AdminCandidateSkillResponse
+{
+    public Guid Id { get; set; }
+    public string SkillName { get; set; } = string.Empty;
+    public double ConfidenceScore { get; set; }
+    public SkillCategory Category { get; set; }
+    public bool IsVerified { get; set; }
+    public SkillLevel SkillLevel { get; set; }
+}
+
+public class AdminCandidateRecommendationResponse
+{
+    public Guid Id { get; set; }
+    public string RecommenderName { get; set; } = string.Empty;
+    public string RecommenderEmail { get; set; } = string.Empty;
+    public string Relationship { get; set; } = string.Empty;
+    public string Status { get; set; } = string.Empty;
+    public bool IsApprovedByCandidate { get; set; }
+    public bool? AdminApproved { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime? SubmittedAt { get; set; }
 }
 
 public class AdminCompanyResponse
@@ -858,6 +1209,17 @@ public class AdminShortlistResponse
 public class AdminSetVisibilityRequest
 {
     public bool Visible { get; set; }
+}
+
+public class AdminSetSeniorityRequest
+{
+    public SeniorityLevel Seniority { get; set; }
+}
+
+public class AdminCvDownloadResponse
+{
+    public string DownloadUrl { get; set; } = string.Empty;
+    public string FileName { get; set; } = string.Empty;
 }
 
 public class UpdateRankingsRequest

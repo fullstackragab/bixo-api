@@ -28,6 +28,14 @@ public class CandidateProfileResponse
     public bool ProfileVisible { get; set; }
     public SeniorityLevel? SeniorityEstimate { get; set; }
     public List<CandidateSkillResponse> Skills { get; set; } = new();
+    public GroupedSkillsResponse GroupedSkills { get; set; } = new();
+
+    /// <summary>
+    /// Derived capabilities for presentation. Groups skills into categories like
+    /// Frontend, Backend, Infrastructure, Practices. Does NOT affect matching.
+    /// </summary>
+    public Dictionary<string, List<string>> Capabilities { get; set; } = new();
+
     public int RecommendationsCount { get; set; }
     public int ProfileViewsCount { get; set; }
     public DateTime CreatedAt { get; set; }
@@ -72,4 +80,16 @@ public class CandidateSkillResponse
     public double ConfidenceScore { get; set; }
     public SkillCategory Category { get; set; }
     public bool IsVerified { get; set; }
+    public SkillLevel SkillLevel { get; set; } = SkillLevel.Secondary;
+}
+
+/// <summary>
+/// Grouped skills response for curated presentation.
+/// Primary skills (max 7) are core competencies.
+/// Secondary skills are supporting tools and technologies.
+/// </summary>
+public class GroupedSkillsResponse
+{
+    public List<CandidateSkillResponse> Primary { get; set; } = new();
+    public List<CandidateSkillResponse> Secondary { get; set; } = new();
 }

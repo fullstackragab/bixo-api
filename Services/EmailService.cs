@@ -727,4 +727,118 @@ public class EmailService : IEmailService
             </body>
             </html>";
     }
+
+    // === Recommendation Emails ===
+
+    public async Task SendRecommendationRequestEmailAsync(RecommendationRequestNotification notification)
+    {
+        try
+        {
+            var subject = "Private recommendation request – Bixo";
+            var body = BuildRecommendationRequestEmailBody(notification);
+
+            // Use recommendations@ sender for higher trust, with Reply-To to support
+            var fromEmail = !string.IsNullOrEmpty(_settings.RecommendationsFromEmail)
+                ? _settings.RecommendationsFromEmail
+                : _settings.FromEmail;
+
+            var msg = new SendGridMessage();
+            msg.SetFrom(new EmailAddress(fromEmail, "Bixo Recommendations"));
+            msg.SetReplyTo(new EmailAddress(_settings.SupportInboxEmail, "Bixo Support"));
+            msg.AddTo(new EmailAddress(notification.Email, notification.RecommenderName));
+            msg.SetSubject(subject);
+            msg.AddContent(MimeType.Html, body);
+
+            var response = await _client.SendEmailAsync(msg);
+
+            if (response.StatusCode != System.Net.HttpStatusCode.OK &&
+                response.StatusCode != System.Net.HttpStatusCode.Accepted)
+            {
+                _logger.LogWarning("Failed to send recommendation request email: {StatusCode}", response.StatusCode);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send recommendation request email to: {Email}", notification.Email);
+        }
+    }
+
+    private static string BuildRecommendationRequestEmailBody(RecommendationRequestNotification notification)
+    {
+        return $@"
+            <html>
+            <body style=""font-family: Arial, sans-serif; line-height: 1.8; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;"">
+                <h1 style=""color: #2563eb; margin-bottom: 24px;"">Private recommendation request</h1>
+
+                <p><strong>{notification.CandidateName}</strong> is building a private profile on Bixo, a curated hiring platform for senior engineers.</p>
+
+                <p>Would you be willing to write a short private recommendation?</p>
+
+                <p style=""color: #6b7280;"">This recommendation is private and will only be shared with companies with {notification.CandidateName}'s explicit approval.</p>
+
+                <p style=""margin-top: 32px;"">
+                    <a href=""{notification.RecommendationUrl}"" style=""background-color: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;"">Write recommendation</a>
+                </p>
+
+                <p style=""margin-top: 32px; color: #6b7280; font-size: 14px;"">This link will expire in 30 days.</p>
+
+                <p style=""margin-top: 32px; color: #6b7280;"">— Bixo</p>
+            </body>
+            </html>";
+    }
+
+    public async Task SendRecommendationReceivedEmailAsync(RecommendationReceivedNotification notification)
+    {
+        try
+        {
+            var subject = "New recommendation received";
+            var body = BuildRecommendationReceivedEmailBody(notification);
+
+            // Use recommendations@ sender for consistency, with Reply-To to support
+            var fromEmail = !string.IsNullOrEmpty(_settings.RecommendationsFromEmail)
+                ? _settings.RecommendationsFromEmail
+                : _settings.FromEmail;
+
+            var msg = new SendGridMessage();
+            msg.SetFrom(new EmailAddress(fromEmail, "Bixo Recommendations"));
+            msg.SetReplyTo(new EmailAddress(_settings.SupportInboxEmail, "Bixo Support"));
+            msg.AddTo(new EmailAddress(notification.Email));
+            msg.SetSubject(subject);
+            msg.AddContent(MimeType.Html, body);
+
+            var response = await _client.SendEmailAsync(msg);
+
+            if (response.StatusCode != System.Net.HttpStatusCode.OK &&
+                response.StatusCode != System.Net.HttpStatusCode.Accepted)
+            {
+                _logger.LogWarning("Failed to send recommendation received email: {StatusCode}", response.StatusCode);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send recommendation received email to: {Email}", notification.Email);
+        }
+    }
+
+    private static string BuildRecommendationReceivedEmailBody(RecommendationReceivedNotification notification)
+    {
+        var greeting = string.IsNullOrEmpty(notification.CandidateFirstName)
+            ? "Hi"
+            : $"Hi {notification.CandidateFirstName}";
+
+        return $@"
+            <html>
+            <body style=""font-family: Arial, sans-serif; line-height: 1.8; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;"">
+                <h1 style=""color: #2563eb; margin-bottom: 24px;"">New recommendation received</h1>
+
+                <p>{greeting},</p>
+
+                <p>You've received a new recommendation from <strong>{notification.RecommenderName}</strong>.</p>
+
+                <p>Review and approve it from your profile to make it visible to companies.</p>
+
+                <p style=""margin-top: 32px; color: #6b7280;"">— Bixo</p>
+            </body>
+            </html>";
+    }
 }

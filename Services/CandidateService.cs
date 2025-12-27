@@ -49,9 +49,10 @@ public class CandidateService : ICandidateService
         if (candidate == null) return null;
 
         var skills = await connection.QueryAsync<dynamic>(@"
-            SELECT id, skill_name, confidence_score, category, is_verified
+            SELECT id, skill_name, confidence_score, category, is_verified, skill_level
             FROM candidate_skills
-            WHERE candidate_id = @CandidateId",
+            WHERE candidate_id = @CandidateId
+            ORDER BY skill_level ASC, confidence_score DESC",
             new { CandidateId = (Guid)candidate.id });
 
         var recommendationsCount = await connection.ExecuteScalarAsync<int>(
@@ -109,8 +110,37 @@ public class CandidateService : ICandidateService
                 SkillName = (string)s.skill_name,
                 ConfidenceScore = (double)(decimal)s.confidence_score,
                 Category = (SkillCategory)(int)s.category,
-                IsVerified = (bool)s.is_verified
+                IsVerified = (bool)s.is_verified,
+                SkillLevel = (SkillLevel)(int)(s.skill_level ?? 1)
             }).ToList(),
+            GroupedSkills = new GroupedSkillsResponse
+            {
+                Primary = skills
+                    .Where(s => (int)(s.skill_level ?? 1) == 0)
+                    .Select(s => new CandidateSkillResponse
+                    {
+                        Id = (Guid)s.id,
+                        SkillName = (string)s.skill_name,
+                        ConfidenceScore = (double)(decimal)s.confidence_score,
+                        Category = (SkillCategory)(int)s.category,
+                        IsVerified = (bool)s.is_verified,
+                        SkillLevel = SkillLevel.Primary
+                    }).ToList(),
+                Secondary = skills
+                    .Where(s => (int)(s.skill_level ?? 1) == 1)
+                    .Select(s => new CandidateSkillResponse
+                    {
+                        Id = (Guid)s.id,
+                        SkillName = (string)s.skill_name,
+                        ConfidenceScore = (double)(decimal)s.confidence_score,
+                        Category = (SkillCategory)(int)s.category,
+                        IsVerified = (bool)s.is_verified,
+                        SkillLevel = SkillLevel.Secondary
+                    }).ToList()
+            },
+            // Derived capabilities for presentation (does not affect matching)
+            Capabilities = CapabilityMapping.DeriveCapabilities(
+                skills.Select(s => (string)s.skill_name)),
             RecommendationsCount = recommendationsCount,
             ProfileViewsCount = profileViewsCount,
             CreatedAt = (DateTime)candidate.created_at,
@@ -122,6 +152,20 @@ public class CandidateService : ICandidateService
     {
         using var connection = _db.CreateConnection();
 
+        // CV is mandatory for Bixo profiles - no CV = no matching = no visibility
+        var hasCv = await connection.ExecuteScalarAsync<bool>(@"
+            SELECT EXISTS(
+                SELECT 1 FROM candidates
+                WHERE user_id = @UserId AND cv_file_key IS NOT NULL
+            )",
+            new { UserId = userId });
+
+        if (!hasCv)
+        {
+            throw new InvalidOperationException("CV is required to create a Bixo profile");
+        }
+
+        // Update profile but keep profile_visible = false until admin approval
         await connection.ExecuteAsync(@"
             UPDATE candidates SET
                 first_name = COALESCE(@FirstName, first_name),
@@ -131,6 +175,7 @@ public class CandidateService : ICandidateService
                 location_preference = COALESCE(@LocationPreference, location_preference),
                 remote_preference = COALESCE(@RemotePreference, remote_preference),
                 availability = COALESCE(@Availability, availability),
+                profile_visible = FALSE,
                 updated_at = @Now
             WHERE user_id = @UserId",
             new
@@ -411,6 +456,13 @@ public class CandidateService : ICandidateService
             throw new InvalidOperationException("Candidate not found");
         }
 
+        // Validate max 7 Primary skills
+        var primarySkillsCount = request.Skills.Count(s => !s.Delete && s.SkillLevel == SkillLevel.Primary);
+        if (primarySkillsCount > 7)
+        {
+            throw new InvalidOperationException("Maximum of 7 Primary skills allowed");
+        }
+
         foreach (var skillUpdate in request.Skills)
         {
             if (skillUpdate.Delete && skillUpdate.Id.HasValue)
@@ -425,7 +477,8 @@ public class CandidateService : ICandidateService
                     UPDATE candidate_skills SET
                         skill_name = @SkillName,
                         category = @Category,
-                        is_verified = @IsVerified
+                        is_verified = @IsVerified,
+                        skill_level = @SkillLevel
                     WHERE id = @Id AND candidate_id = @CandidateId",
                     new
                     {
@@ -433,21 +486,23 @@ public class CandidateService : ICandidateService
                         CandidateId = candidateId,
                         skillUpdate.SkillName,
                         Category = (int)skillUpdate.Category,
-                        skillUpdate.IsVerified
+                        skillUpdate.IsVerified,
+                        SkillLevel = (int)skillUpdate.SkillLevel
                     });
             }
             else
             {
                 await connection.ExecuteAsync(@"
-                    INSERT INTO candidate_skills (id, candidate_id, skill_name, confidence_score, category, is_verified)
-                    VALUES (@Id, @CandidateId, @SkillName, 1.0, @Category, TRUE)
+                    INSERT INTO candidate_skills (id, candidate_id, skill_name, confidence_score, category, is_verified, skill_level)
+                    VALUES (@Id, @CandidateId, @SkillName, 1.0, @Category, TRUE, @SkillLevel)
                     ON CONFLICT (candidate_id, skill_name) DO NOTHING",
                     new
                     {
                         Id = Guid.NewGuid(),
                         CandidateId = candidateId,
                         skillUpdate.SkillName,
-                        Category = (int)skillUpdate.Category
+                        Category = (int)skillUpdate.Category,
+                        SkillLevel = (int)skillUpdate.SkillLevel
                     });
             }
         }

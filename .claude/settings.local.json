@@ -16,7 +16,8 @@
       "Bash(dir:*)",
       "Bash(findstr:*)",
       "Bash(PGPASSWORD=UDU9qSGUSaMRHhYczjOd4Zi4xsoHq3KU psql:*)",
-      "Bash(powershell:*)"
+      "Bash(powershell:*)",
+      "Bash(PGPASSWORD=bixo psql:*)"
     ]
   }
 }

@@ -10,6 +10,7 @@ public class CandidateSkill
     public double ConfidenceScore { get; set; }
     public SkillCategory Category { get; set; }
     public bool IsVerified { get; set; }
+    public SkillLevel SkillLevel { get; set; } = SkillLevel.Secondary;
 
     // Navigation
     public Candidate Candidate { get; set; } = null!;
