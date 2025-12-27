@@ -509,7 +509,10 @@ public class EmailService : IEmailService
                 : _settings.FromEmail;
             var from = new EmailAddress(fromEmail, _settings.FromName);
             var to = new EmailAddress(_settings.AdminInboxEmail);
-            var subject = $"[New Candidate] {notification.FirstName} {notification.LastName}";
+            var name = $"{notification.FirstName} {notification.LastName}".Trim();
+            var subject = !string.IsNullOrEmpty(name)
+                ? $"New candidate joined: {name}"
+                : "New candidate joined Bixo";
             var htmlContent = BuildAdminNewCandidateEmailBody(notification);
 
             var msg = MailHelper.CreateSingleEmail(from, to, subject, null, htmlContent);
@@ -535,16 +538,23 @@ public class EmailService : IEmailService
     private static string BuildAdminNewCandidateEmailBody(AdminNewCandidateNotification notification)
     {
         var name = $"{notification.FirstName} {notification.LastName}".Trim();
-        if (string.IsNullOrEmpty(name)) name = "Not provided";
+        var displayName = string.IsNullOrEmpty(name) ? "A new candidate" : name;
 
         return $@"
             <html>
-            <body style=""font-family: Arial, sans-serif; line-height: 1.6; color: #333;"">
-                <h2 style=""color: #2563eb;"">New Candidate Registration</h2>
-                <hr style=""border: 1px solid #e5e7eb;"" />
-                <p><strong>Name:</strong> {name}</p>
-                <p><strong>Email:</strong> {notification.Email}</p>
-                <p><strong>Registered:</strong> {notification.CreatedAt:yyyy-MM-dd HH:mm:ss} UTC</p>
+            <body style=""font-family: Arial, sans-serif; line-height: 1.8; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;"">
+                <h1 style=""color: #2563eb; margin-bottom: 24px;"">New candidate registration</h1>
+
+                <p><strong>{displayName}</strong> just signed up on Bixo.</p>
+
+                <div style=""background-color: #f9fafb; padding: 20px; border-radius: 8px; margin: 24px 0;"">
+                    <p style=""margin: 0 0 8px 0;""><strong>Email:</strong> {notification.Email}</p>
+                    <p style=""margin: 0;""><strong>Registered:</strong> {notification.CreatedAt:MMMM dd, yyyy} at {notification.CreatedAt:HH:mm} UTC</p>
+                </div>
+
+                <p style=""color: #6b7280;"">Their profile will need CV upload and approval before becoming active.</p>
+
+                <p style=""margin-top: 32px; color: #6b7280;"">— Bixo</p>
             </body>
             </html>";
     }
@@ -564,7 +574,7 @@ public class EmailService : IEmailService
                 : _settings.FromEmail;
             var from = new EmailAddress(fromEmail, _settings.FromName);
             var to = new EmailAddress(_settings.AdminInboxEmail);
-            var subject = $"[New Company] {notification.CompanyName}";
+            var subject = $"New company joined: {notification.CompanyName}";
             var htmlContent = BuildAdminNewCompanyEmailBody(notification);
 
             var msg = MailHelper.CreateSingleEmail(from, to, subject, null, htmlContent);
@@ -589,15 +599,24 @@ public class EmailService : IEmailService
 
     private static string BuildAdminNewCompanyEmailBody(AdminNewCompanyNotification notification)
     {
+        var industry = !string.IsNullOrEmpty(notification.Industry) ? notification.Industry : "Not specified";
+
         return $@"
             <html>
-            <body style=""font-family: Arial, sans-serif; line-height: 1.6; color: #333;"">
-                <h2 style=""color: #2563eb;"">New Company Registration</h2>
-                <hr style=""border: 1px solid #e5e7eb;"" />
-                <p><strong>Company Name:</strong> {notification.CompanyName}</p>
-                <p><strong>Email:</strong> {notification.Email}</p>
-                <p><strong>Industry:</strong> {notification.Industry ?? "Not specified"}</p>
-                <p><strong>Registered:</strong> {notification.CreatedAt:yyyy-MM-dd HH:mm:ss} UTC</p>
+            <body style=""font-family: Arial, sans-serif; line-height: 1.8; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;"">
+                <h1 style=""color: #2563eb; margin-bottom: 24px;"">New company registration</h1>
+
+                <p><strong>{notification.CompanyName}</strong> just signed up on Bixo.</p>
+
+                <div style=""background-color: #f9fafb; padding: 20px; border-radius: 8px; margin: 24px 0;"">
+                    <p style=""margin: 0 0 8px 0;""><strong>Contact:</strong> {notification.Email}</p>
+                    <p style=""margin: 0 0 8px 0;""><strong>Industry:</strong> {industry}</p>
+                    <p style=""margin: 0;""><strong>Registered:</strong> {notification.CreatedAt:MMMM dd, yyyy} at {notification.CreatedAt:HH:mm} UTC</p>
+                </div>
+
+                <p style=""color: #6b7280;"">They can now request shortlists for their open roles.</p>
+
+                <p style=""margin-top: 32px; color: #6b7280;"">— Bixo</p>
             </body>
             </html>";
     }
@@ -614,7 +633,7 @@ public class EmailService : IEmailService
 
             var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
             var to = new EmailAddress(_settings.AdminInboxEmail);
-            var subject = $"[New Shortlist] {notification.RoleTitle} - {notification.CompanyName}";
+            var subject = $"New shortlist request: {notification.RoleTitle} at {notification.CompanyName}";
             var htmlContent = BuildAdminNewShortlistEmailBody(notification);
 
             var msg = MailHelper.CreateSingleEmail(from, to, subject, null, htmlContent);
@@ -649,14 +668,19 @@ public class EmailService : IEmailService
 
             var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
             var to = new EmailAddress(_settings.AdminInboxEmail);
-            var emailSubject = $"[Alert] {subject}";
+            var emailSubject = $"Bixo alert: {subject}";
             var htmlContent = $@"
                 <html>
-                <body style=""font-family: Arial, sans-serif; line-height: 1.6; color: #333;"">
-                    <h2 style=""color: #dc2626;"">{subject}</h2>
-                    <hr style=""border: 1px solid #e5e7eb;"" />
-                    <pre style=""white-space: pre-wrap; font-family: monospace; background: #f9fafb; padding: 16px; border-radius: 6px;"">{message}</pre>
-                    <p style=""margin-top: 24px; color: #6b7280;"">— Bixo System</p>
+                <body style=""font-family: Arial, sans-serif; line-height: 1.8; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;"">
+                    <h1 style=""color: #dc2626; margin-bottom: 24px;"">System alert</h1>
+
+                    <p><strong>{subject}</strong></p>
+
+                    <div style=""background-color: #fef2f2; border: 1px solid #fecaca; padding: 20px; border-radius: 8px; margin: 24px 0;"">
+                        <pre style=""white-space: pre-wrap; font-family: monospace; margin: 0; color: #991b1b;"">{message}</pre>
+                    </div>
+
+                    <p style=""margin-top: 32px; color: #6b7280;"">— Bixo</p>
                 </body>
                 </html>";
 
@@ -869,25 +893,34 @@ public class EmailService : IEmailService
             ? "Remote"
             : (!string.IsNullOrEmpty(notification.Location) ? notification.Location : "Not specified");
 
+        var seniority = !string.IsNullOrEmpty(notification.Seniority) ? notification.Seniority : "Not specified";
+
         var notes = !string.IsNullOrEmpty(notification.AdditionalNotes)
-            ? $@"<h3>Additional Notes</h3>
-                <div style=""background-color: #f9fafb; padding: 15px; border-radius: 5px;"">
-                    <p>{notification.AdditionalNotes.Replace("\n", "<br />")}</p>
+            ? $@"<div style=""margin-top: 16px;"">
+                    <p style=""margin: 0 0 8px 0; font-weight: 600;"">Additional notes:</p>
+                    <p style=""margin: 0; color: #4b5563;"">{notification.AdditionalNotes.Replace("\n", "<br />")}</p>
                 </div>"
             : "";
 
         return $@"
             <html>
-            <body style=""font-family: Arial, sans-serif; line-height: 1.6; color: #333;"">
-                <h2 style=""color: #2563eb;"">New Shortlist Request</h2>
-                <hr style=""border: 1px solid #e5e7eb;"" />
-                <p><strong>Company:</strong> {notification.CompanyName}</p>
-                <p><strong>Role:</strong> {notification.RoleTitle}</p>
-                <p><strong>Seniority:</strong> {notification.Seniority ?? "Not specified"}</p>
-                <p><strong>Location:</strong> {location}</p>
-                <p><strong>Tech Stack:</strong> {techStack}</p>
-                <p><strong>Created:</strong> {notification.CreatedAt:yyyy-MM-dd HH:mm:ss} UTC</p>
-                {notes}
+            <body style=""font-family: Arial, sans-serif; line-height: 1.8; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;"">
+                <h1 style=""color: #2563eb; margin-bottom: 24px;"">New shortlist request</h1>
+
+                <p><strong>{notification.CompanyName}</strong> is looking for a <strong>{notification.RoleTitle}</strong>.</p>
+
+                <div style=""background-color: #f9fafb; padding: 20px; border-radius: 8px; margin: 24px 0;"">
+                    <p style=""margin: 0 0 8px 0;""><strong>Role:</strong> {notification.RoleTitle}</p>
+                    <p style=""margin: 0 0 8px 0;""><strong>Seniority:</strong> {seniority}</p>
+                    <p style=""margin: 0 0 8px 0;""><strong>Location:</strong> {location}</p>
+                    <p style=""margin: 0 0 8px 0;""><strong>Tech stack:</strong> {techStack}</p>
+                    <p style=""margin: 0;""><strong>Requested:</strong> {notification.CreatedAt:MMMM dd, yyyy} at {notification.CreatedAt:HH:mm} UTC</p>
+                    {notes}
+                </div>
+
+                <p style=""color: #6b7280;"">This request needs to be reviewed and priced before the company can proceed.</p>
+
+                <p style=""margin-top: 32px; color: #6b7280;"">— Bixo</p>
             </body>
             </html>";
     }
