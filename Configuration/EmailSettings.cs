@@ -13,5 +13,5 @@ public class EmailSettings
     public string DataResidency { get; set; } = "eu"; // "eu" or "global"
 
     /// <summary>Frontend URL for generating deep links in emails</summary>
-    public string FrontendUrl { get; set; } = "https://app.bixo.io";
+    public string FrontendUrl { get; set; } = "https://bixo.io";
 }

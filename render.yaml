@@ -53,6 +53,8 @@ services:
         value: support@bixo.io
       - key: Email__FromName
         value: Bixo
+      - key: Email__FrontendUrl
+        sync: false
 
 databases:
   - name: bixo-db
