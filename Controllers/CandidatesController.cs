@@ -158,6 +158,54 @@ public class CandidatesController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Update the candidate's GitHub summary. Only available if admin has generated one.
+    /// </summary>
+    [HttpPut("github-summary")]
+    public async Task<ActionResult<ApiResponse>> UpdateGitHubSummary([FromBody] UpdateGitHubSummaryRequest request)
+    {
+        try
+        {
+            using var connection = _db.CreateConnection();
+
+            // Get current candidate - check if they have a github_summary (admin generated)
+            var candidate = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+                SELECT id, github_summary_generated_at
+                FROM candidates
+                WHERE user_id = @UserId",
+                new { UserId = GetUserId() });
+
+            if (candidate == null)
+            {
+                return NotFound(ApiResponse.Fail("Candidate not found"));
+            }
+
+            // Only allow editing if admin has generated a summary
+            if (candidate.github_summary_generated_at == null)
+            {
+                return BadRequest(ApiResponse.Fail("GitHub summary has not been generated yet. Contact support to generate one."));
+            }
+
+            await connection.ExecuteAsync(@"
+                UPDATE candidates
+                SET github_summary = @Summary,
+                    updated_at = @Now
+                WHERE user_id = @UserId",
+                new
+                {
+                    Summary = request.Summary,
+                    Now = DateTime.UtcNow,
+                    UserId = GetUserId()
+                });
+
+            return Ok(ApiResponse.Ok("GitHub summary updated"));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(ApiResponse.Fail(ex.Message));
+        }
+    }
+
     [HttpGet("notifications")]
     public async Task<ActionResult<ApiResponse<List<NotificationResponse>>>> GetNotifications([FromQuery] bool unreadOnly = false)
     {
@@ -556,4 +604,10 @@ public class InterestResponseResult
     public ShortlistMessageResponse Message { get; set; } = null!;
     /// <summary>Confirmation message to display to the candidate (ephemeral, not stored)</summary>
     public string Confirmation { get; set; } = string.Empty;
+}
+
+public class UpdateGitHubSummaryRequest
+{
+    /// <summary>Updated GitHub summary text (1-2 paragraphs)</summary>
+    public string Summary { get; set; } = string.Empty;
 }

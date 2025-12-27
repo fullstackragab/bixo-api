@@ -1,6 +1,8 @@
 using Dapper;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
+using bixo_api.Configuration;
 using bixo_api.Data;
 using bixo_api.Models.DTOs.Common;
 using bixo_api.Models.DTOs.Recommendation;
@@ -21,6 +23,10 @@ public class AdminController : ControllerBase
     private readonly IS3StorageService _s3Service;
     private readonly ICandidateService _candidateService;
     private readonly IPricingService _pricingService;
+    private readonly IEmailService _emailService;
+    private readonly INotificationService _notificationService;
+    private readonly IGitHubEnrichmentService _gitHubEnrichmentService;
+    private readonly EmailSettings _emailSettings;
 
     public AdminController(
         IDbConnectionFactory db,
@@ -28,7 +34,11 @@ public class AdminController : ControllerBase
         IRecommendationService recommendationService,
         IS3StorageService s3Service,
         ICandidateService candidateService,
-        IPricingService pricingService)
+        IPricingService pricingService,
+        IEmailService emailService,
+        INotificationService notificationService,
+        IGitHubEnrichmentService gitHubEnrichmentService,
+        IOptions<EmailSettings> emailSettings)
     {
         _db = db;
         _shortlistService = shortlistService;
@@ -36,6 +46,10 @@ public class AdminController : ControllerBase
         _s3Service = s3Service;
         _candidateService = candidateService;
         _pricingService = pricingService;
+        _emailService = emailService;
+        _notificationService = notificationService;
+        _gitHubEnrichmentService = gitHubEnrichmentService;
+        _emailSettings = emailSettings.Value;
     }
 
     [HttpGet("dashboard")]
@@ -139,7 +153,8 @@ public class AdminController : ControllerBase
         using var connection = _db.CreateConnection();
 
         var candidate = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
-            SELECT c.id, c.user_id, u.email, c.first_name, c.last_name, c.linkedin_url,
+            SELECT c.id, c.user_id, u.email, c.first_name, c.last_name, c.linkedin_url, c.github_url,
+                   c.github_summary, c.github_summary_generated_at,
                    c.desired_role, c.location_preference, c.remote_preference,
                    c.availability, c.seniority_estimate, c.profile_visible, c.open_to_opportunities,
                    c.cv_file_key, c.cv_original_file_name,
@@ -182,6 +197,9 @@ public class AdminController : ControllerBase
             FirstName = candidate.first_name as string,
             LastName = candidate.last_name as string,
             LinkedInUrl = candidate.linkedin_url as string,
+            GitHubUrl = candidate.github_url as string,
+            GitHubSummary = candidate.github_summary as string,
+            GitHubSummaryGeneratedAt = candidate.github_summary_generated_at as DateTime?,
             DesiredRole = candidate.desired_role as string,
             LocationPreference = candidate.location_preference as string,
             RemotePreference = candidate.remote_preference != null ? (RemotePreference?)(int)candidate.remote_preference : null,
@@ -295,9 +313,12 @@ public class AdminController : ControllerBase
     {
         using var connection = _db.CreateConnection();
 
-        // Check candidate exists and has CV
-        var candidate = await connection.QueryFirstOrDefaultAsync<dynamic>(
-            "SELECT cv_file_key FROM candidates WHERE id = @Id",
+        // Check candidate exists and has CV, get email info for notification
+        var candidate = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT c.cv_file_key, c.first_name, c.user_id, u.email
+            FROM candidates c
+            JOIN users u ON u.id = c.user_id
+            WHERE c.id = @Id",
             new { Id = id });
 
         if (candidate == null)
@@ -319,6 +340,22 @@ public class AdminController : ControllerBase
                 updated_at = @Now
             WHERE id = @Id",
             new { Now = DateTime.UtcNow, ApprovedBy = adminUserId, Id = id });
+
+        // Send in-app notification
+        await _notificationService.CreateNotificationAsync(
+            (Guid)candidate.user_id,
+            "profile_approved",
+            "Your profile has been approved",
+            "Your profile is now visible to companies. You may start receiving interest and shortlist notifications."
+        );
+
+        // Send approval email (fire and forget)
+        _ = _emailService.SendCandidateProfileActiveEmailAsync(new CandidateProfileActiveNotification
+        {
+            Email = (string)candidate.email,
+            FirstName = candidate.first_name as string,
+            ProfileUrl = $"{_emailSettings.FrontendUrl}/candidate/profile"
+        });
 
         return Ok(ApiResponse.Ok("Candidate approved and now visible for matching"));
     }
@@ -392,6 +429,60 @@ public class AdminController : ControllerBase
             DownloadUrl = downloadUrl,
             FileName = candidate.cv_original_file_name as string ?? "cv.pdf"
         }));
+    }
+
+    /// <summary>
+    /// Generate GitHub summary for a candidate by reading their GitHub profile README files.
+    /// Saves the summary to the database and returns it.
+    /// </summary>
+    [HttpPost("candidates/{id}/github-summary")]
+    public async Task<ActionResult<ApiResponse<GitHubSummaryResponse>>> GenerateGitHubSummary(Guid id)
+    {
+        using var connection = _db.CreateConnection();
+
+        var candidate = await connection.QueryFirstOrDefaultAsync<dynamic>(
+            "SELECT id, github_url, github_summary FROM candidates WHERE id = @Id",
+            new { Id = id });
+
+        if (candidate == null)
+        {
+            return NotFound(ApiResponse<GitHubSummaryResponse>.Fail("Candidate not found"));
+        }
+
+        var githubUrl = candidate.github_url as string;
+        if (string.IsNullOrEmpty(githubUrl))
+        {
+            return BadRequest(ApiResponse<GitHubSummaryResponse>.Fail("Candidate has no GitHub URL configured"));
+        }
+
+        var result = await _gitHubEnrichmentService.GenerateSummaryAsync(githubUrl);
+        if (result == null)
+        {
+            return BadRequest(ApiResponse<GitHubSummaryResponse>.Fail("Could not generate summary. GitHub profile may be private or have no public repositories."));
+        }
+
+        // Save to database
+        await connection.ExecuteAsync(@"
+            UPDATE candidates
+            SET github_summary = @Summary,
+                github_summary_generated_at = @GeneratedAt,
+                updated_at = @GeneratedAt
+            WHERE id = @Id",
+            new
+            {
+                Summary = result.Summary,
+                GeneratedAt = DateTime.UtcNow,
+                Id = id
+            });
+
+        return Ok(ApiResponse<GitHubSummaryResponse>.Ok(new GitHubSummaryResponse
+        {
+            Summary = result.Summary,
+            Username = result.Username,
+            PublicRepoCount = result.PublicRepoCount,
+            TopLanguages = result.TopLanguages,
+            GeneratedAt = DateTime.UtcNow
+        }, "GitHub summary generated successfully"));
     }
 
     /// <summary>
@@ -535,7 +626,7 @@ public class AdminController : ControllerBase
         var candidates = await connection.QueryAsync<dynamic>(@"
             SELECT sc.id, sc.candidate_id, sc.rank, sc.match_score, sc.match_reason, sc.admin_approved,
                    sc.is_new, sc.previously_recommended_in, sc.re_inclusion_reason,
-                   ca.first_name, ca.last_name, ca.desired_role, ca.seniority_estimate, ca.availability, u.email
+                   ca.first_name, ca.last_name, ca.desired_role, ca.seniority_estimate, ca.availability, ca.github_summary, u.email
             FROM shortlist_candidates sc
             JOIN candidates ca ON ca.id = sc.candidate_id
             JOIN users u ON u.id = ca.user_id
@@ -670,6 +761,7 @@ public class AdminController : ControllerBase
                     MatchReason = c.match_reason as string,
                     AdminApproved = c.admin_approved as bool? ?? false,
                     Skills = allSkills.ContainsKey(candidateId) ? allSkills[candidateId] : new List<string>(),
+                    GitHubSummary = c.github_summary as string,
                     IsNew = isNew,
                     PreviouslyRecommendedIn = c.previously_recommended_in as Guid?,
                     ReInclusionReason = c.re_inclusion_reason as string,
@@ -763,6 +855,18 @@ public class AdminController : ControllerBase
     {
         using var connection = _db.CreateConnection();
 
+        // Get current approval status to detect newly approved candidates
+        var currentApprovals = await connection.QueryAsync<dynamic>(@"
+            SELECT candidate_id, admin_approved
+            FROM shortlist_candidates
+            WHERE shortlist_request_id = @ShortlistId",
+            new { ShortlistId = id });
+
+        var previouslyApproved = currentApprovals
+            .Where(c => c.admin_approved == true)
+            .Select(c => (Guid)c.candidate_id)
+            .ToHashSet();
+
         foreach (var ranking in request.Rankings)
         {
             await connection.ExecuteAsync(@"
@@ -770,6 +874,17 @@ public class AdminController : ControllerBase
                 SET rank = @Rank, admin_approved = @AdminApproved
                 WHERE shortlist_request_id = @ShortlistId AND candidate_id = @CandidateId",
                 new { Rank = ranking.Rank, AdminApproved = ranking.AdminApproved, ShortlistId = id, CandidateId = ranking.CandidateId });
+        }
+
+        // Trigger GitHub enrichment for newly approved candidates (fire and forget)
+        var newlyApproved = request.Rankings
+            .Where(r => r.AdminApproved && !previouslyApproved.Contains(r.CandidateId))
+            .Select(r => r.CandidateId)
+            .ToList();
+
+        foreach (var candidateId in newlyApproved)
+        {
+            _ = _gitHubEnrichmentService.EnrichCandidateAsync(candidateId);
         }
 
         return Ok(ApiResponse.Ok("Rankings updated"));
@@ -1255,6 +1370,9 @@ public class AdminCandidateDetailResponse
     public string? FirstName { get; set; }
     public string? LastName { get; set; }
     public string? LinkedInUrl { get; set; }
+    public string? GitHubUrl { get; set; }
+    public string? GitHubSummary { get; set; }
+    public DateTime? GitHubSummaryGeneratedAt { get; set; }
     public string? DesiredRole { get; set; }
     public string? LocationPreference { get; set; }
     public RemotePreference? RemotePreference { get; set; }
@@ -1460,6 +1578,7 @@ public class AdminShortlistCandidateResponse
     public string? MatchReason { get; set; }
     public bool AdminApproved { get; set; }
     public List<string> Skills { get; set; } = new();
+    public string? GitHubSummary { get; set; }
     public bool IsNew { get; set; }
     public Guid? PreviouslyRecommendedIn { get; set; }
     public string? ReInclusionReason { get; set; }
@@ -1601,4 +1720,13 @@ public class AdminCvReparseResponse
     public string Status { get; set; } = string.Empty;
     public string? Error { get; set; }
     public int SkillsExtracted { get; set; }
+}
+
+public class GitHubSummaryResponse
+{
+    public string Summary { get; set; } = string.Empty;
+    public string Username { get; set; } = string.Empty;
+    public int PublicRepoCount { get; set; }
+    public List<string> TopLanguages { get; set; } = new();
+    public DateTime GeneratedAt { get; set; }
 }

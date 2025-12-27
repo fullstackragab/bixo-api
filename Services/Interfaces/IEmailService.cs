@@ -33,6 +33,18 @@ public interface IEmailService
     /// <summary>Sent when admin extends the search window</summary>
     Task SendShortlistSearchExtendedEmailAsync(ShortlistSearchExtendedNotification notification);
 
+    /// <summary>Sent when admin starts processing a shortlist</summary>
+    Task SendShortlistProcessingStartedEmailAsync(ShortlistProcessingStartedNotification notification);
+
+    /// <summary>Sent when company approves pricing</summary>
+    Task SendShortlistPricingApprovedEmailAsync(ShortlistPricingApprovedNotification notification);
+
+    /// <summary>Sent when shortlist is completed (delivered + paid)</summary>
+    Task SendShortlistCompletedEmailAsync(ShortlistCompletedNotification notification);
+
+    /// <summary>Sent when company declines pricing</summary>
+    Task SendShortlistPricingDeclinedEmailAsync(ShortlistPricingDeclinedNotification notification);
+
     // === Recommendation Emails ===
 
     /// <summary>Sent to recommender when candidate requests a recommendation</summary>
@@ -56,12 +68,14 @@ public class CompanyWelcomeNotification
 {
     public string Email { get; set; } = string.Empty;
     public string? CompanyName { get; set; }
+    public string DashboardUrl { get; set; } = string.Empty;
 }
 
 /// <summary>Sent when pricing is ready for company review</summary>
 public class ShortlistPricingReadyNotification
 {
     public string Email { get; set; } = string.Empty;
+    public string CompanyName { get; set; } = string.Empty;
     public string RoleTitle { get; set; } = string.Empty;
     public Guid ShortlistId { get; set; }
     public string ShortlistUrl { get; set; } = string.Empty;
@@ -80,8 +94,8 @@ public class ShortlistAuthorizationRequiredNotification
 public class ShortlistDeliveredNotification
 {
     public string Email { get; set; } = string.Empty;
+    public string CompanyName { get; set; } = string.Empty;
     public string RoleTitle { get; set; } = string.Empty;
-    public int CandidatesCount { get; set; }
     public Guid ShortlistId { get; set; }
     public string ShortlistUrl { get; set; } = string.Empty;
 }
@@ -101,12 +115,14 @@ public class CandidateWelcomeNotification
 {
     public string Email { get; set; } = string.Empty;
     public string? FirstName { get; set; }
+    public string ProfileUrl { get; set; } = string.Empty;
 }
 
 public class CandidateProfileActiveNotification
 {
     public string Email { get; set; } = string.Empty;
     public string? FirstName { get; set; }
+    public string ProfileUrl { get; set; } = string.Empty;
 }
 
 public class AdminNewCandidateNotification
@@ -177,4 +193,45 @@ public class ShortlistSearchExtendedNotification
     public string RoleTitle { get; set; } = string.Empty;
     public string Message { get; set; } = string.Empty;
     public Guid ShortlistId { get; set; }
+}
+
+/// <summary>Sent when admin starts processing a shortlist request</summary>
+public class ShortlistProcessingStartedNotification
+{
+    public string Email { get; set; } = string.Empty;
+    public string CompanyName { get; set; } = string.Empty;
+    public string RoleTitle { get; set; } = string.Empty;
+    public Guid ShortlistId { get; set; }
+    public string ShortlistUrl { get; set; } = string.Empty;
+}
+
+/// <summary>Sent when company approves pricing</summary>
+public class ShortlistPricingApprovedNotification
+{
+    public string Email { get; set; } = string.Empty;
+    public string CompanyName { get; set; } = string.Empty;
+    public string RoleTitle { get; set; } = string.Empty;
+    public Guid ShortlistId { get; set; }
+    public string ShortlistUrl { get; set; } = string.Empty;
+}
+
+/// <summary>Sent when shortlist is completed (delivered + paid)</summary>
+public class ShortlistCompletedNotification
+{
+    public string Email { get; set; } = string.Empty;
+    public string CompanyName { get; set; } = string.Empty;
+    public string RoleTitle { get; set; } = string.Empty;
+    public Guid ShortlistId { get; set; }
+    public string ShortlistUrl { get; set; } = string.Empty;
+}
+
+/// <summary>Sent when company declines pricing</summary>
+public class ShortlistPricingDeclinedNotification
+{
+    public string Email { get; set; } = string.Empty;
+    public string CompanyName { get; set; } = string.Empty;
+    public string RoleTitle { get; set; } = string.Empty;
+    public string Reason { get; set; } = string.Empty;
+    public Guid ShortlistId { get; set; }
+    public string ShortlistUrl { get; set; } = string.Empty;
 }

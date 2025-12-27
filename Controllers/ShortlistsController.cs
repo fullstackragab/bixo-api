@@ -168,6 +168,31 @@ public class ShortlistsController : ControllerBase
     }
 
     /// <summary>
+    /// Decline shortlist entirely with structured feedback.
+    /// Cancels the shortlist and releases any payment authorization.
+    /// </summary>
+    [HttpPost("{id}/decline")]
+    public async Task<ActionResult<ApiResponse>> DeclineShortlist(Guid id, [FromBody] DeclineShortlistRequest request)
+    {
+        try
+        {
+            // Validate reason
+            var validReasons = new[] { "pricing", "relevance", "timing", "other" };
+            if (!validReasons.Contains(request.Reason.ToLower()))
+            {
+                return BadRequest(ApiResponse.Fail("Invalid reason. Must be: pricing, relevance, timing, or other"));
+            }
+
+            await _shortlistService.DeclineShortlistAsync(GetCompanyId(), id, request.Reason, request.Feedback);
+            return Ok(ApiResponse.Ok("Shortlist declined"));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(ApiResponse.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
     /// Step 4: Authorize payment (hold funds, no capture yet).
     /// Requires pricing to be approved first.
     /// </summary>
@@ -520,4 +545,13 @@ public class DeclinePricingRequest
 {
     /// <summary>Optional reason for declining the pricing</summary>
     public string? Reason { get; set; }
+}
+
+public class DeclineShortlistRequest
+{
+    /// <summary>Reason for declining: pricing, relevance, timing, other</summary>
+    public string Reason { get; set; } = "other";
+
+    /// <summary>Optional additional feedback</summary>
+    public string? Feedback { get; set; }
 }

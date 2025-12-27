@@ -41,6 +41,12 @@ public interface IShortlistService
     Task DeclinePricingAsync(Guid companyId, Guid shortlistRequestId, string? reason);
 
     /// <summary>
+    /// Company declines shortlist entirely (status → Cancelled).
+    /// Releases any payment authorization and records feedback.
+    /// </summary>
+    Task DeclineShortlistAsync(Guid companyId, Guid shortlistRequestId, string reason, string? feedback);
+
+    /// <summary>
     /// Get shortlists with pending pricing for a company.
     /// </summary>
     Task<List<ScopeProposalResponse>> GetPendingScopeProposalsAsync(Guid companyId);

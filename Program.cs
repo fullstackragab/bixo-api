@@ -33,6 +33,14 @@ builder.Services.AddScoped<IMatchingService, MatchingService>();
 builder.Services.AddScoped<IMessageService, MessageService>();
 builder.Services.AddScoped<IRecommendationService, RecommendationService>();
 
+// GitHub enrichment
+builder.Services.AddHttpClient("GitHub", client =>
+{
+    client.DefaultRequestHeaders.Add("User-Agent", "Bixo-API");
+    client.DefaultRequestHeaders.Add("Accept", "application/vnd.github.v3+json");
+});
+builder.Services.AddScoped<IGitHubEnrichmentService, GitHubEnrichmentService>();
+
 // Payment providers
 builder.Services.AddHttpClient("PayPal");
 builder.Services.AddHttpClient("Solana");

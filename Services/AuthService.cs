@@ -18,12 +18,14 @@ public class AuthService : IAuthService
 {
     private readonly IDbConnectionFactory _db;
     private readonly JwtSettings _jwtSettings;
+    private readonly EmailSettings _emailSettings;
     private readonly IEmailService _emailService;
 
-    public AuthService(IDbConnectionFactory db, IOptions<JwtSettings> jwtSettings, IEmailService emailService)
+    public AuthService(IDbConnectionFactory db, IOptions<JwtSettings> jwtSettings, IOptions<EmailSettings> emailSettings, IEmailService emailService)
     {
         _db = db;
         _jwtSettings = jwtSettings.Value;
+        _emailSettings = emailSettings.Value;
         _emailService = emailService;
     }
 
@@ -72,7 +74,8 @@ public class AuthService : IAuthService
         _ = _emailService.SendCandidateWelcomeEmailAsync(new CandidateWelcomeNotification
         {
             Email = request.Email.ToLower(),
-            FirstName = request.FirstName
+            FirstName = request.FirstName,
+            ProfileUrl = $"{_emailSettings.FrontendUrl}/candidate/profile"
         });
 
         // Send admin notification (fire and forget)
@@ -135,7 +138,8 @@ public class AuthService : IAuthService
         _ = _emailService.SendCompanyWelcomeEmailAsync(new CompanyWelcomeNotification
         {
             Email = request.Email.ToLower(),
-            CompanyName = request.CompanyName
+            CompanyName = request.CompanyName,
+            DashboardUrl = $"{_emailSettings.FrontendUrl}/company/dashboard"
         });
 
         // Send admin notification (fire and forget)

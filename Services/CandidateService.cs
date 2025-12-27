@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Dapper;
 using bixo_api.Data;
 using bixo_api.Models.DTOs.Candidate;
@@ -10,6 +11,19 @@ namespace bixo_api.Services;
 
 public class CandidateService : ICandidateService
 {
+    private static readonly Regex GitHubUrlRegex = new(@"^https?://github\.com/[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}/?$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static void ValidateGitHubUrl(string? url)
+    {
+        if (string.IsNullOrEmpty(url)) return;
+
+        if (url.Length > 500)
+            throw new InvalidOperationException("GitHub URL must be 500 characters or less");
+
+        if (!GitHubUrlRegex.IsMatch(url))
+            throw new InvalidOperationException("GitHub URL must be a valid GitHub profile URL (e.g., https://github.com/username)");
+    }
+
     private readonly IDbConnectionFactory _db;
     private readonly IS3StorageService _s3Service;
     private readonly ICvParsingService _cvParsingService;
@@ -35,7 +49,8 @@ public class CandidateService : ICandidateService
         using var connection = _db.CreateConnection();
 
         var candidate = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
-            SELECT c.id, c.first_name, c.last_name, c.linkedin_url, c.cv_file_key, c.cv_original_file_name,
+            SELECT c.id, c.first_name, c.last_name, c.linkedin_url, c.github_url, c.github_summary, c.github_summary_generated_at,
+                   c.cv_file_key, c.cv_original_file_name,
                    c.desired_role, c.location_preference, c.remote_preference, c.availability,
                    c.open_to_opportunities, c.profile_visible, c.profile_approved_at, c.seniority_estimate, c.created_at,
                    u.email, u.last_active_at,
@@ -97,6 +112,9 @@ public class CandidateService : ICandidateService
             FirstName = candidate.first_name as string,
             LastName = candidate.last_name as string,
             LinkedInUrl = candidate.linkedin_url as string,
+            GitHubUrl = candidate.github_url as string,
+            GitHubSummary = candidate.github_summary as string,
+            GitHubSummaryGeneratedAt = candidate.github_summary_generated_at as DateTime?,
             CvFileName = candidate.cv_original_file_name as string,
             CvDownloadUrl = cvDownloadUrl,
             DesiredRole = candidate.desired_role as string,
@@ -154,6 +172,9 @@ public class CandidateService : ICandidateService
 
     public async Task<CandidateProfileResponse> OnboardAsync(Guid userId, CandidateOnboardRequest request)
     {
+        // Validate GitHub URL if provided
+        ValidateGitHubUrl(request.GitHubUrl);
+
         using var connection = _db.CreateConnection();
 
         // CV is mandatory for Bixo profiles - no CV = no matching = no visibility
@@ -175,6 +196,7 @@ public class CandidateService : ICandidateService
                 first_name = COALESCE(@FirstName, first_name),
                 last_name = COALESCE(@LastName, last_name),
                 linkedin_url = COALESCE(@LinkedInUrl, linkedin_url),
+                github_url = COALESCE(@GitHubUrl, github_url),
                 desired_role = COALESCE(@DesiredRole, desired_role),
                 location_preference = COALESCE(@LocationPreference, location_preference),
                 remote_preference = COALESCE(@RemotePreference, remote_preference),
@@ -188,6 +210,7 @@ public class CandidateService : ICandidateService
                 request.FirstName,
                 request.LastName,
                 request.LinkedInUrl,
+                request.GitHubUrl,
                 request.DesiredRole,
                 request.LocationPreference,
                 RemotePreference = request.RemotePreference.HasValue ? (int?)request.RemotePreference.Value : null,
@@ -200,6 +223,9 @@ public class CandidateService : ICandidateService
 
     public async Task<CandidateProfileResponse> UpdateProfileAsync(Guid userId, UpdateCandidateRequest request)
     {
+        // Validate GitHub URL if provided
+        ValidateGitHubUrl(request.GitHubUrl);
+
         using var connection = _db.CreateConnection();
 
         // Get candidate ID for location update
@@ -218,6 +244,7 @@ public class CandidateService : ICandidateService
                 first_name = COALESCE(@FirstName, first_name),
                 last_name = COALESCE(@LastName, last_name),
                 linkedin_url = COALESCE(@LinkedInUrl, linkedin_url),
+                github_url = COALESCE(@GitHubUrl, github_url),
                 desired_role = COALESCE(@DesiredRole, desired_role),
                 location_preference = COALESCE(@LocationPreference, location_preference),
                 remote_preference = COALESCE(@RemotePreference, remote_preference),
@@ -233,6 +260,7 @@ public class CandidateService : ICandidateService
                 request.FirstName,
                 request.LastName,
                 request.LinkedInUrl,
+                request.GitHubUrl,
                 request.DesiredRole,
                 request.LocationPreference,
                 RemotePreference = request.RemotePreference.HasValue ? (int?)request.RemotePreference.Value : null,

@@ -8,6 +8,7 @@ public class UpdateCandidateRequest
     public string? FirstName { get; set; }
     public string? LastName { get; set; }
     public string? LinkedInUrl { get; set; }
+    public string? GitHubUrl { get; set; }
     public string? DesiredRole { get; set; }
 
     // Legacy field (still supported for backwards compatibility)

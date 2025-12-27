@@ -10,6 +10,9 @@ public class CandidateProfileResponse
     public string? FirstName { get; set; }
     public string? LastName { get; set; }
     public string? LinkedInUrl { get; set; }
+    public string? GitHubUrl { get; set; }
+    public string? GitHubSummary { get; set; }
+    public DateTime? GitHubSummaryGeneratedAt { get; set; }
     public string? CvFileName { get; set; }
     public string? CvDownloadUrl { get; set; }
     public string? DesiredRole { get; set; }

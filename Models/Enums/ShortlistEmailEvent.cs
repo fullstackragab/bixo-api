@@ -22,5 +22,17 @@ public enum ShortlistEmailEvent
     AdjustmentSuggested = 5,
 
     /// <summary>Search window has been extended</summary>
-    SearchExtended = 6
+    SearchExtended = 6,
+
+    /// <summary>Admin has started processing the request</summary>
+    ProcessingStarted = 7,
+
+    /// <summary>Company approved pricing, ready for delivery</summary>
+    PricingApproved = 8,
+
+    /// <summary>Shortlist completed (delivered + paid)</summary>
+    Completed = 9,
+
+    /// <summary>Company declined pricing, back to processing</summary>
+    PricingDeclined = 10
 }

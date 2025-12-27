@@ -357,31 +357,64 @@ public class ShortlistService : IShortlistService
             SELECT sc.id, sc.candidate_id, sc.match_score, sc.match_reason, sc.rank, sc.admin_approved,
                    sc.is_new, sc.previously_recommended_in, sc.re_inclusion_reason,
                    sc.interest_status, sc.interest_responded_at,
-                   c.first_name, c.last_name, c.desired_role, c.seniority_estimate, c.availability
+                   c.first_name, c.last_name, c.desired_role, c.seniority_estimate, c.availability, c.remote_preference,
+                   c.github_summary,
+                   cl.country as location_country
             FROM shortlist_candidates sc
             JOIN candidates c ON c.id = sc.candidate_id
+            LEFT JOIN candidate_locations cl ON cl.candidate_id = c.id
             WHERE sc.shortlist_request_id = @ShortlistId
             ORDER BY sc.rank",
             new { ShortlistId = shortlistId });
 
         var status = (ShortlistStatus)shortlist.status;
 
-        // Only show candidates after delivery, and only approved ones
-        IEnumerable<dynamic> filteredCandidates;
-        if (status == ShortlistStatus.Delivered || status == ShortlistStatus.Completed)
-        {
-            // After delivery: only show admin-approved candidates
-            filteredCandidates = candidates.Where(c => (bool)c.admin_approved);
-        }
-        else
-        {
-            // Before delivery: don't expose any candidates to company
-            filteredCandidates = Enumerable.Empty<dynamic>();
-        }
-
+        // Determine what to show based on status
         var candidatesList = new List<ShortlistCandidateResponse>();
+        var candidatePreviewsList = new List<ShortlistCandidatePreviewResponse>();
         int newCandidatesCount = 0;
         int repeatedCandidatesCount = 0;
+
+        // Get admin-approved candidates
+        var approvedCandidates = candidates.Where(c => (bool)c.admin_approved).ToList();
+
+        // Show previews when pricing is pending or approved (before delivery)
+        var showPreviews = status == ShortlistStatus.PricingPending || status == ShortlistStatus.Approved;
+
+        // Show full profiles after delivery
+        var showFullProfiles = status == ShortlistStatus.Delivered || status == ShortlistStatus.Completed;
+
+        if (showPreviews && approvedCandidates.Any())
+        {
+            // Build preview list with limited info (no identifying details)
+            int previewId = 1;
+            foreach (var c in approvedCandidates)
+            {
+                var skills = await connection.QueryAsync<dynamic>(@"
+                    SELECT skill_name
+                    FROM candidate_skills
+                    WHERE candidate_id = @CandidateId
+                    ORDER BY confidence_score DESC
+                    LIMIT 5",
+                    new { CandidateId = (Guid)c.candidate_id });
+
+                candidatePreviewsList.Add(new ShortlistCandidatePreviewResponse
+                {
+                    PreviewId = previewId++,
+                    Role = c.desired_role as string,
+                    Seniority = c.seniority_estimate != null ? (SeniorityLevel?)(int)c.seniority_estimate : null,
+                    TopSkills = skills.Select(s => (string)s.skill_name).ToList(),
+                    Availability = (Availability)c.availability,
+                    WorkSetup = c.remote_preference != null ? (RemotePreference?)(int)c.remote_preference : null,
+                    Region = c.location_country as string,
+                    WhyThisCandidate = (string)c.match_reason,
+                    Rank = (int)c.rank,
+                    HasPublicWorkSummary = !string.IsNullOrEmpty(c.github_summary as string)
+                });
+            }
+        }
+
+        IEnumerable<dynamic> filteredCandidates = showFullProfiles ? approvedCandidates : Enumerable.Empty<dynamic>();
 
         foreach (var c in filteredCandidates)
         {
@@ -412,6 +445,7 @@ public class ShortlistService : IShortlistService
                 MatchReason = (string)c.match_reason,
                 Rank = (int)c.rank,
                 Availability = (Availability)c.availability,
+                GitHubSummary = c.github_summary as string,
                 IsNew = isNew,
                 PreviouslyRecommendedIn = c.previously_recommended_in as Guid?,
                 ReInclusionReason = c.re_inclusion_reason as string,
@@ -454,8 +488,9 @@ public class ShortlistService : IShortlistService
             PricePaid = shortlist.price_paid != null ? (decimal?)shortlist.price_paid : null,
             CreatedAt = (DateTime)shortlist.created_at,
             CompletedAt = shortlist.completed_at != null ? (DateTime?)shortlist.completed_at : null,
-            CandidatesCount = candidatesList.Count,
+            CandidatesCount = showFullProfiles ? candidatesList.Count : candidatePreviewsList.Count,
             Candidates = candidatesList,
+            CandidatePreviews = candidatePreviewsList,
             InterestCounts = interestCounts,
             PreviousRequestId = shortlist.previous_request_id as Guid?,
             PricingType = shortlist.pricing_type as string ?? "new",
@@ -561,6 +596,9 @@ public class ShortlistService : IShortlistService
         await connection.ExecuteAsync(
             "UPDATE shortlist_requests SET status = @Status WHERE id = @Id",
             new { Status = (int)ShortlistStatus.Processing, Id = shortlistId });
+
+        // Send ProcessingStarted email to company (idempotent - only sends once)
+        _ = TrySendEmailEventAsync(shortlistId, ShortlistEmailEvent.ProcessingStarted);
 
         // Check if this is a follow-up shortlist
         var previousRequestId = shortlist.previous_request_id as Guid?;
@@ -871,6 +909,9 @@ public class ShortlistService : IShortlistService
         _logger.LogInformation(
             "Shortlist {ShortlistId} marked as paid by admin {AdminId}. Final price: {FinalPrice}. Status: Completed.",
             shortlistRequestId, adminUserId, finalPrice);
+
+        // Send Completed email to company (idempotent - only sends once)
+        _ = TrySendEmailEventAsync(shortlistRequestId, ShortlistEmailEvent.Completed);
     }
 
     /// <summary>
@@ -917,6 +958,9 @@ public class ShortlistService : IShortlistService
             });
 
         _logger.LogInformation("Shortlist {ShortlistId} completed.", shortlistRequestId);
+
+        // Send Completed email to company (idempotent - only sends once)
+        _ = TrySendEmailEventAsync(shortlistRequestId, ShortlistEmailEvent.Completed);
     }
 
     /// <summary>
@@ -1080,6 +1124,9 @@ Declining will not affect your visibility for future opportunities.";
                 Id = shortlistRequestId
             });
 
+        // Send PricingApproved email to company (idempotent - only sends once)
+        _ = TrySendEmailEventAsync(shortlistRequestId, ShortlistEmailEvent.PricingApproved);
+
         return new ScopeApprovalResult
         {
             Success = true,
@@ -1128,6 +1175,9 @@ Declining will not affect your visibility for future opportunities.";
                 Now = DateTime.UtcNow,
                 Id = shortlistRequestId
             });
+
+        // Send PricingApproved email to company (idempotent - only sends once)
+        _ = TrySendEmailEventAsync(shortlistRequestId, ShortlistEmailEvent.PricingApproved);
     }
 
     /// <summary>
@@ -1167,6 +1217,69 @@ Declining will not affect your visibility for future opportunities.";
                 Reason = reason,
                 Id = shortlistRequestId
             });
+
+        // Send PricingDeclined email to company (idempotent - only sends once)
+        _ = TrySendEmailEventAsync(shortlistRequestId, ShortlistEmailEvent.PricingDeclined);
+    }
+
+    /// <summary>
+    /// Company declines shortlist entirely - cancels and releases any payment authorization
+    /// </summary>
+    public async Task DeclineShortlistAsync(Guid companyId, Guid shortlistRequestId, string reason, string? feedback)
+    {
+        using var connection = _db.CreateConnection();
+
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT id, status
+            FROM shortlist_requests
+            WHERE id = @Id AND company_id = @CompanyId",
+            new { Id = shortlistRequestId, CompanyId = companyId });
+
+        if (shortlist == null)
+        {
+            throw new InvalidOperationException("Shortlist not found");
+        }
+
+        var status = (ShortlistStatus)(int)shortlist.status;
+
+        // Can only decline during pricing stage
+        var declinableStatuses = new[]
+        {
+            ShortlistStatus.PricingPending,
+            ShortlistStatus.Approved
+        };
+
+        if (!declinableStatuses.Contains(status))
+        {
+            throw new InvalidOperationException($"Cannot decline shortlist in current status: {status}");
+        }
+
+        await connection.ExecuteAsync(@"
+            UPDATE shortlist_requests
+            SET status = @Status,
+                outcome = @Outcome,
+                outcome_reason = @OutcomeReason,
+                outcome_decided_at = @Now,
+                decline_reason = @DeclineReason,
+                decline_feedback = @DeclineFeedback,
+                declined_at = @Now
+            WHERE id = @Id",
+            new
+            {
+                Status = (int)ShortlistStatus.Cancelled,
+                Outcome = (int)ShortlistOutcome.Cancelled,
+                OutcomeReason = $"Company declined: {reason}",
+                Now = DateTime.UtcNow,
+                DeclineReason = reason.ToLower(),
+                DeclineFeedback = feedback,
+                Id = shortlistRequestId
+            });
+
+        // TODO: Release any payment authorization if one exists
+        // await ReleasePaymentAuthorizationAsync(shortlistRequestId);
+
+        // Send PricingDeclined email
+        _ = TrySendEmailEventAsync(shortlistRequestId, ShortlistEmailEvent.PricingDeclined);
     }
 
     /// <summary>
@@ -1555,7 +1668,7 @@ Declining will not affect your visibility for future opportunities.";
 
         // Get shortlist and company info for email
         var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
-            SELECT sr.id, sr.role_title, sr.outcome_reason, sr.adjustment_suggestion, sr.extension_notes,
+            SELECT sr.id, sr.role_title, sr.outcome_reason, sr.adjustment_suggestion, sr.extension_notes, sr.scope_approval_notes,
                    c.id as company_id, c.company_name, u.email as company_email
             FROM shortlist_requests sr
             JOIN companies c ON c.id = sr.company_id
@@ -1575,12 +1688,21 @@ Declining will not affect your visibility for future opportunities.";
         var outcomeReason = shortlist.outcome_reason as string ?? "";
         var adjustmentSuggestion = shortlist.adjustment_suggestion as string ?? "";
         var extensionNotes = shortlist.extension_notes as string ?? "";
+        var scopeApprovalNotes = shortlist.scope_approval_notes as string ?? "";
         var shortlistUrl = $"{_emailSettings.FrontendUrl}/company/shortlists/{shortlistRequestId}";
+
+        // Extract decline reason from scope_approval_notes if present
+        var declineReason = "";
+        if (scopeApprovalNotes.Contains("Declined:"))
+        {
+            var declineIndex = scopeApprovalNotes.LastIndexOf("Declined:");
+            declineReason = scopeApprovalNotes.Substring(declineIndex + 9).Trim();
+        }
 
         // Send the appropriate email
         try
         {
-            await SendEmailForEventAsync(emailEvent, companyEmail, roleTitle, shortlistRequestId, shortlistUrl, companyName, outcomeReason, adjustmentSuggestion, extensionNotes);
+            await SendEmailForEventAsync(emailEvent, companyEmail, roleTitle, shortlistRequestId, shortlistUrl, companyName, outcomeReason, adjustmentSuggestion, extensionNotes, declineReason);
 
             // Record that email was sent
             await connection.ExecuteAsync(@"
@@ -1704,7 +1826,8 @@ Declining will not affect your visibility for future opportunities.";
         string companyName = "",
         string outcomeReason = "",
         string adjustmentSuggestion = "",
-        string extensionNotes = "")
+        string extensionNotes = "",
+        string declineReason = "")
     {
         switch (emailEvent)
         {
@@ -1712,6 +1835,7 @@ Declining will not affect your visibility for future opportunities.";
                 await _emailService.SendShortlistPricingReadyEmailAsync(new ShortlistPricingReadyNotification
                 {
                     Email = email,
+                    CompanyName = companyName,
                     RoleTitle = roleTitle,
                     ShortlistId = shortlistId,
                     ShortlistUrl = shortlistUrl
@@ -1732,6 +1856,7 @@ Declining will not affect your visibility for future opportunities.";
                 await _emailService.SendShortlistDeliveredEmailAsync(new ShortlistDeliveredNotification
                 {
                     Email = email,
+                    CompanyName = companyName,
                     RoleTitle = roleTitle,
                     ShortlistId = shortlistId,
                     ShortlistUrl = shortlistUrl
@@ -1771,6 +1896,51 @@ Declining will not affect your visibility for future opportunities.";
                     RoleTitle = roleTitle,
                     Message = extensionNotes,
                     ShortlistId = shortlistId
+                });
+                break;
+
+            case ShortlistEmailEvent.ProcessingStarted:
+                await _emailService.SendShortlistProcessingStartedEmailAsync(new ShortlistProcessingStartedNotification
+                {
+                    Email = email,
+                    CompanyName = companyName,
+                    RoleTitle = roleTitle,
+                    ShortlistId = shortlistId,
+                    ShortlistUrl = shortlistUrl
+                });
+                break;
+
+            case ShortlistEmailEvent.PricingApproved:
+                await _emailService.SendShortlistPricingApprovedEmailAsync(new ShortlistPricingApprovedNotification
+                {
+                    Email = email,
+                    CompanyName = companyName,
+                    RoleTitle = roleTitle,
+                    ShortlistId = shortlistId,
+                    ShortlistUrl = shortlistUrl
+                });
+                break;
+
+            case ShortlistEmailEvent.Completed:
+                await _emailService.SendShortlistCompletedEmailAsync(new ShortlistCompletedNotification
+                {
+                    Email = email,
+                    CompanyName = companyName,
+                    RoleTitle = roleTitle,
+                    ShortlistId = shortlistId,
+                    ShortlistUrl = shortlistUrl
+                });
+                break;
+
+            case ShortlistEmailEvent.PricingDeclined:
+                await _emailService.SendShortlistPricingDeclinedEmailAsync(new ShortlistPricingDeclinedNotification
+                {
+                    Email = email,
+                    CompanyName = companyName,
+                    RoleTitle = roleTitle,
+                    Reason = declineReason,
+                    ShortlistId = shortlistId,
+                    ShortlistUrl = shortlistUrl
                 });
                 break;
 

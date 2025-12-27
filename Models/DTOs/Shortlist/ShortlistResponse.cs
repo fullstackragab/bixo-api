@@ -125,6 +125,9 @@ public class ShortlistCandidateResponse
     public int Rank { get; set; }
     public Availability Availability { get; set; }
 
+    /// <summary>GitHub profile summary (auto-generated from public repos)</summary>
+    public string? GitHubSummary { get; set; }
+
     // Versioning: TRUE if candidate is new in this shortlist, FALSE if previously recommended
     public bool IsNew { get; set; } = true;
 
@@ -157,7 +160,17 @@ public class ShortlistCandidateResponse
 
 public class ShortlistDetailResponse : ShortlistResponse
 {
+    /// <summary>Full candidate details (only populated after delivery)</summary>
     public List<ShortlistCandidateResponse> Candidates { get; set; } = new();
+
+    /// <summary>Limited candidate previews (shown when status is PricingPending or Approved)</summary>
+    public List<ShortlistCandidatePreviewResponse> CandidatePreviews { get; set; } = new();
+
+    /// <summary>True if previews are available (status is PricingPending or Approved)</summary>
+    public bool HasPreviews => CandidatePreviews.Count > 0;
+
+    /// <summary>True if full profiles are unlocked (status is Delivered or Completed)</summary>
+    public bool ProfilesUnlocked => Candidates.Count > 0;
 
     /// <summary>Counts by interest status for tab display</summary>
     public InterestStatusCounts InterestCounts { get; set; } = new();
@@ -169,4 +182,63 @@ public class InterestStatusCounts
     public int Declined { get; set; }
     public int NoResponse { get; set; }
     public int Total => Interested + Declined + NoResponse;
+}
+
+/// <summary>
+/// Limited candidate preview shown before approval.
+/// Does NOT include identifying info (name, LinkedIn, exact location).
+/// </summary>
+public class ShortlistCandidatePreviewResponse
+{
+    /// <summary>Preview ID (NOT the actual candidate ID for privacy)</summary>
+    public int PreviewId { get; set; }
+
+    /// <summary>Candidate's current/desired role</summary>
+    public string? Role { get; set; }
+
+    /// <summary>Seniority level</summary>
+    public SeniorityLevel? Seniority { get; set; }
+
+    /// <summary>Top 3-5 skills</summary>
+    public List<string> TopSkills { get; set; } = new();
+
+    /// <summary>Availability status</summary>
+    public Availability Availability { get; set; }
+
+    /// <summary>Work setup preference (remote/hybrid/onsite)</summary>
+    public RemotePreference? WorkSetup { get; set; }
+
+    /// <summary>Location region (country only, not city for privacy)</summary>
+    public string? Region { get; set; }
+
+    /// <summary>Why this candidate was selected (match reason)</summary>
+    public string? WhyThisCandidate { get; set; }
+
+    /// <summary>Candidate's rank in shortlist</summary>
+    public int Rank { get; set; }
+
+    /// <summary>True if public project documentation has been reviewed</summary>
+    public bool HasPublicWorkSummary { get; set; }
+
+    /// <summary>Display label for seniority</summary>
+    public string SeniorityLabel => Seniority?.ToString() ?? "Not specified";
+
+    /// <summary>Display label for availability</summary>
+    public string AvailabilityLabel => Availability switch
+    {
+        Availability.Open => "Available",
+        Availability.NotNow => "Not available now",
+        Availability.Passive => "Passively looking",
+        _ => "Not specified"
+    };
+
+    /// <summary>Display label for work setup</summary>
+    public string WorkSetupLabel => WorkSetup switch
+    {
+        RemotePreference.Remote => "Remote",
+        RemotePreference.Hybrid => "Hybrid",
+        RemotePreference.Onsite => "On-site",
+        RemotePreference.Flexible => "Flexible",
+        _ => "Not specified"
+    };
 }
