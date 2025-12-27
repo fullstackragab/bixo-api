@@ -76,20 +76,9 @@ public class CvParsingService : ICvParsingService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "PdfPig failed to extract text, falling back to basic extraction");
-
-            // Fallback to basic extraction for corrupted/non-standard PDFs
-            memoryStream.Position = 0;
-            var bytes = memoryStream.ToArray();
-            var content = Encoding.UTF8.GetString(bytes);
-
-            foreach (var c in content)
-            {
-                if (char.IsLetterOrDigit(c) || char.IsWhiteSpace(c) || char.IsPunctuation(c))
-                {
-                    sb.Append(c);
-                }
-            }
+            _logger.LogWarning(ex, "PdfPig failed to extract text from PDF - file may be corrupted or non-standard");
+            // Return empty string to trigger parse failure - raw PDF bytes are not useful text
+            return string.Empty;
         }
 
         return sb.ToString();

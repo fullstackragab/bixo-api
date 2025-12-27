@@ -364,7 +364,7 @@ public class CandidateService : ICandidateService
         using var connection = _db.CreateConnection();
 
         var candidate = await connection.QueryFirstOrDefaultAsync<dynamic>(
-            "SELECT id, first_name, last_name, email FROM candidates c JOIN users u ON u.id = c.user_id WHERE c.user_id = @UserId",
+            "SELECT c.id, c.first_name, c.last_name, u.email FROM candidates c JOIN users u ON u.id = c.user_id WHERE c.user_id = @UserId",
             new { UserId = userId });
 
         if (candidate == null)

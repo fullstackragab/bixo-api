@@ -1351,6 +1351,172 @@ Declining will not affect your visibility for future opportunities.";
         };
     }
 
+    /// <summary>
+    /// Admin suggests adjustments to the brief when no suitable candidates found.
+    /// Sets status to AwaitingAdjustment and sends email to company.
+    /// </summary>
+    public async Task<SuggestAdjustmentResult> SuggestAdjustmentAsync(Guid shortlistRequestId, Guid adminUserId, string message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return new SuggestAdjustmentResult
+            {
+                Success = false,
+                ErrorMessage = "Message is required when suggesting adjustments"
+            };
+        }
+
+        using var connection = _db.CreateConnection();
+
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT sr.id, sr.status, sr.role_title, c.id as company_id, c.company_name, u.email as company_email
+            FROM shortlist_requests sr
+            JOIN companies c ON c.id = sr.company_id
+            JOIN users u ON u.id = c.user_id
+            WHERE sr.id = @ShortlistRequestId",
+            new { ShortlistRequestId = shortlistRequestId });
+
+        if (shortlist == null)
+        {
+            return new SuggestAdjustmentResult
+            {
+                Success = false,
+                ErrorMessage = "Shortlist not found"
+            };
+        }
+
+        var currentStatus = (ShortlistStatus)(int)shortlist.status;
+
+        // Can only suggest adjustment for shortlists in early stages
+        if (currentStatus != ShortlistStatus.Submitted && currentStatus != ShortlistStatus.Processing)
+        {
+            return new SuggestAdjustmentResult
+            {
+                Success = false,
+                ErrorMessage = $"Cannot suggest adjustment: shortlist status is {currentStatus}. Only Submitted or Processing shortlists can receive adjustment suggestions."
+            };
+        }
+
+        var now = DateTime.UtcNow;
+
+        // Update shortlist with adjustment suggestion
+        await connection.ExecuteAsync(@"
+            UPDATE shortlist_requests
+            SET status = @Status,
+                adjustment_suggestion = @Message,
+                updated_at = @Now
+            WHERE id = @ShortlistRequestId",
+            new
+            {
+                Status = (int)ShortlistStatus.AwaitingAdjustment,
+                Message = message,
+                Now = now,
+                ShortlistRequestId = shortlistRequestId
+            });
+
+        _logger.LogInformation(
+            "Shortlist {ShortlistId} set to AwaitingAdjustment by admin {AdminId}",
+            shortlistRequestId, adminUserId);
+
+        // Send adjustment suggestion email
+        _ = TrySendEmailEventAsync(shortlistRequestId, ShortlistEmailEvent.AdjustmentSuggested);
+
+        return new SuggestAdjustmentResult
+        {
+            Success = true
+        };
+    }
+
+    /// <summary>
+    /// Admin extends the search window when more time is needed.
+    /// Keeps status as Processing and sends email to company.
+    /// </summary>
+    public async Task<ExtendSearchResult> ExtendSearchAsync(Guid shortlistRequestId, Guid adminUserId, string message, int extendDays)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return new ExtendSearchResult
+            {
+                Success = false,
+                ErrorMessage = "Message is required when extending search"
+            };
+        }
+
+        if (extendDays < 1 || extendDays > 30)
+        {
+            return new ExtendSearchResult
+            {
+                Success = false,
+                ErrorMessage = "Extension days must be between 1 and 30"
+            };
+        }
+
+        using var connection = _db.CreateConnection();
+
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT sr.id, sr.status, sr.role_title, c.id as company_id, c.company_name, u.email as company_email
+            FROM shortlist_requests sr
+            JOIN companies c ON c.id = sr.company_id
+            JOIN users u ON u.id = c.user_id
+            WHERE sr.id = @ShortlistRequestId",
+            new { ShortlistRequestId = shortlistRequestId });
+
+        if (shortlist == null)
+        {
+            return new ExtendSearchResult
+            {
+                Success = false,
+                ErrorMessage = "Shortlist not found"
+            };
+        }
+
+        var currentStatus = (ShortlistStatus)(int)shortlist.status;
+
+        // Can only extend search for shortlists in early stages
+        if (currentStatus != ShortlistStatus.Submitted && currentStatus != ShortlistStatus.Processing)
+        {
+            return new ExtendSearchResult
+            {
+                Success = false,
+                ErrorMessage = $"Cannot extend search: shortlist status is {currentStatus}. Only Submitted or Processing shortlists can have search extended."
+            };
+        }
+
+        var now = DateTime.UtcNow;
+        var newDeadline = now.AddDays(extendDays);
+
+        // Update shortlist with extension info
+        await connection.ExecuteAsync(@"
+            UPDATE shortlist_requests
+            SET status = @Status,
+                search_extended_at = @Now,
+                search_deadline = @NewDeadline,
+                extension_notes = @Message,
+                updated_at = @Now
+            WHERE id = @ShortlistRequestId",
+            new
+            {
+                Status = (int)ShortlistStatus.Processing,
+                Now = now,
+                NewDeadline = newDeadline,
+                Message = message,
+                ShortlistRequestId = shortlistRequestId
+            });
+
+        _logger.LogInformation(
+            "Shortlist {ShortlistId} search extended by {Days} days by admin {AdminId}. New deadline: {Deadline}",
+            shortlistRequestId, extendDays, adminUserId, newDeadline);
+
+        // Send search extended email
+        _ = TrySendEmailEventAsync(shortlistRequestId, ShortlistEmailEvent.SearchExtended);
+
+        return new ExtendSearchResult
+        {
+            Success = true,
+            NewDeadline = newDeadline
+        };
+    }
+
     // === Email Event Tracking ===
 
     public async Task<bool> TrySendEmailEventAsync(Guid shortlistRequestId, ShortlistEmailEvent emailEvent)
@@ -1377,7 +1543,8 @@ Declining will not affect your visibility for future opportunities.";
 
         // Get shortlist and company info for email
         var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
-            SELECT sr.id, sr.role_title, sr.outcome_reason, c.id as company_id, c.company_name, u.email as company_email
+            SELECT sr.id, sr.role_title, sr.outcome_reason, sr.adjustment_suggestion, sr.extension_notes,
+                   c.id as company_id, c.company_name, u.email as company_email
             FROM shortlist_requests sr
             JOIN companies c ON c.id = sr.company_id
             JOIN users u ON u.id = c.user_id
@@ -1394,12 +1561,14 @@ Declining will not affect your visibility for future opportunities.";
         var companyName = shortlist.company_name as string ?? "";
         var roleTitle = (string)shortlist.role_title;
         var outcomeReason = shortlist.outcome_reason as string ?? "";
+        var adjustmentSuggestion = shortlist.adjustment_suggestion as string ?? "";
+        var extensionNotes = shortlist.extension_notes as string ?? "";
         var shortlistUrl = $"{_emailSettings.FrontendUrl}/company/shortlists/{shortlistRequestId}";
 
         // Send the appropriate email
         try
         {
-            await SendEmailForEventAsync(emailEvent, companyEmail, roleTitle, shortlistRequestId, shortlistUrl, companyName, outcomeReason);
+            await SendEmailForEventAsync(emailEvent, companyEmail, roleTitle, shortlistRequestId, shortlistUrl, companyName, outcomeReason, adjustmentSuggestion, extensionNotes);
 
             // Record that email was sent
             await connection.ExecuteAsync(@"
@@ -1450,9 +1619,9 @@ Declining will not affect your visibility for future opportunities.";
         var emailEvent = (ShortlistEmailEvent)(int)lastEmail.email_event;
         var sentTo = (string)lastEmail.sent_to;
 
-        // Get shortlist info (including fields needed for NoMatch emails)
+        // Get shortlist info (including fields needed for all email types)
         var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
-            SELECT sr.role_title, sr.outcome_reason, c.company_name
+            SELECT sr.role_title, sr.outcome_reason, sr.adjustment_suggestion, sr.extension_notes, c.company_name
             FROM shortlist_requests sr
             JOIN companies c ON c.id = sr.company_id
             WHERE sr.id = @ShortlistRequestId",
@@ -1466,10 +1635,12 @@ Declining will not affect your visibility for future opportunities.";
         var roleTitle = (string)shortlist.role_title;
         var companyName = shortlist.company_name as string ?? "";
         var outcomeReason = shortlist.outcome_reason as string ?? "";
+        var adjustmentSuggestion = shortlist.adjustment_suggestion as string ?? "";
+        var extensionNotes = shortlist.extension_notes as string ?? "";
         var shortlistUrl = $"{_emailSettings.FrontendUrl}/company/shortlists/{shortlistRequestId}";
 
         // Send the email
-        await SendEmailForEventAsync(emailEvent, sentTo, roleTitle, shortlistRequestId, shortlistUrl, companyName, outcomeReason);
+        await SendEmailForEventAsync(emailEvent, sentTo, roleTitle, shortlistRequestId, shortlistUrl, companyName, outcomeReason, adjustmentSuggestion, extensionNotes);
 
         // Record the resend
         await connection.ExecuteAsync(@"
@@ -1519,7 +1690,9 @@ Declining will not affect your visibility for future opportunities.";
         Guid shortlistId,
         string shortlistUrl,
         string companyName = "",
-        string outcomeReason = "")
+        string outcomeReason = "",
+        string adjustmentSuggestion = "",
+        string extensionNotes = "")
     {
         switch (emailEvent)
         {
@@ -1562,6 +1735,30 @@ Declining will not affect your visibility for future opportunities.";
                     Reason = outcomeReason,
                     ShortlistId = shortlistId,
                     ShortlistUrl = shortlistUrl
+                });
+                break;
+
+            case ShortlistEmailEvent.AdjustmentSuggested:
+                await _emailService.SendShortlistAdjustmentSuggestedEmailAsync(new ShortlistAdjustmentSuggestedNotification
+                {
+                    Email = email,
+                    CompanyName = companyName,
+                    RoleTitle = roleTitle,
+                    Message = adjustmentSuggestion,
+                    ShortlistId = shortlistId,
+                    EditUrl = $"{_emailSettings.FrontendUrl}/company/shortlists/{shortlistId}/edit",
+                    CloseUrl = $"{_emailSettings.FrontendUrl}/company/shortlists/{shortlistId}"
+                });
+                break;
+
+            case ShortlistEmailEvent.SearchExtended:
+                await _emailService.SendShortlistSearchExtendedEmailAsync(new ShortlistSearchExtendedNotification
+                {
+                    Email = email,
+                    CompanyName = companyName,
+                    RoleTitle = roleTitle,
+                    Message = extensionNotes,
+                    ShortlistId = shortlistId
                 });
                 break;
 

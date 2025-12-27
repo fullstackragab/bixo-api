@@ -16,5 +16,11 @@ public enum ShortlistEmailEvent
     Delivered = 3,
 
     /// <summary>No suitable candidates found</summary>
-    NoMatch = 4
+    NoMatch = 4,
+
+    /// <summary>Admin suggested adjustments to the brief</summary>
+    AdjustmentSuggested = 5,
+
+    /// <summary>Search window has been extended</summary>
+    SearchExtended = 6
 }

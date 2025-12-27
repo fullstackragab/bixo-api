@@ -738,6 +738,127 @@ public class EmailService : IEmailService
             </html>";
     }
 
+    public async Task SendShortlistAdjustmentSuggestedEmailAsync(ShortlistAdjustmentSuggestedNotification notification)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_settings.ApiKey))
+            {
+                _logger.LogWarning("Email settings not configured, skipping adjustment suggestion email");
+                return;
+            }
+
+            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
+            var to = new EmailAddress(notification.Email);
+            var subject = $"Suggestion for your {notification.RoleTitle} search";
+            var htmlContent = BuildShortlistAdjustmentSuggestedEmailBody(notification);
+
+            var msg = MailHelper.CreateSingleEmail(from, to, subject, null, htmlContent);
+
+            var response = await _client.SendEmailAsync(msg);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("Shortlist adjustment suggestion email sent to: {Email} for shortlist {ShortlistId}",
+                    notification.Email, notification.ShortlistId);
+            }
+            else
+            {
+                var responseBody = await response.Body.ReadAsStringAsync();
+                _logger.LogError("SendGrid API returned {StatusCode}: {Body}", response.StatusCode, responseBody);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send adjustment suggestion email to: {Email}", notification.Email);
+        }
+    }
+
+    private static string BuildShortlistAdjustmentSuggestedEmailBody(ShortlistAdjustmentSuggestedNotification notification)
+    {
+        var escapedMessage = notification.Message.Replace("\n", "<br />");
+        return $@"
+            <html>
+            <body style=""font-family: Arial, sans-serif; line-height: 1.8; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;"">
+                <h1 style=""color: #2563eb; margin-bottom: 24px;"">Suggestion for your {notification.RoleTitle} search</h1>
+
+                <p>Hi {notification.CompanyName},</p>
+
+                <div style=""background-color: #f9fafb; padding: 20px; border-radius: 8px; margin: 24px 0;"">
+                    <p style=""margin: 0;"">{escapedMessage}</p>
+                </div>
+
+                <p>You can:</p>
+                <ul>
+                    <li><a href=""{notification.EditUrl}"" style=""color: #2563eb;"">Update your requirements</a></li>
+                    <li><a href=""{notification.CloseUrl}"" style=""color: #2563eb;"">Close this request</a></li>
+                </ul>
+
+                <p style=""margin-top: 24px;"">If you have questions, reply to this email.</p>
+
+                <p style=""margin-top: 32px; color: #6b7280;"">— The Bixo Team</p>
+            </body>
+            </html>";
+    }
+
+    public async Task SendShortlistSearchExtendedEmailAsync(ShortlistSearchExtendedNotification notification)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_settings.ApiKey))
+            {
+                _logger.LogWarning("Email settings not configured, skipping search extended email");
+                return;
+            }
+
+            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
+            var to = new EmailAddress(notification.Email);
+            var subject = $"Update on your {notification.RoleTitle} search";
+            var htmlContent = BuildShortlistSearchExtendedEmailBody(notification);
+
+            var msg = MailHelper.CreateSingleEmail(from, to, subject, null, htmlContent);
+
+            var response = await _client.SendEmailAsync(msg);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("Shortlist search extended email sent to: {Email} for shortlist {ShortlistId}",
+                    notification.Email, notification.ShortlistId);
+            }
+            else
+            {
+                var responseBody = await response.Body.ReadAsStringAsync();
+                _logger.LogError("SendGrid API returned {StatusCode}: {Body}", response.StatusCode, responseBody);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send search extended email to: {Email}", notification.Email);
+        }
+    }
+
+    private static string BuildShortlistSearchExtendedEmailBody(ShortlistSearchExtendedNotification notification)
+    {
+        var escapedMessage = notification.Message.Replace("\n", "<br />");
+        return $@"
+            <html>
+            <body style=""font-family: Arial, sans-serif; line-height: 1.8; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;"">
+                <h1 style=""color: #2563eb; margin-bottom: 24px;"">Update on your {notification.RoleTitle} search</h1>
+
+                <p>Hi {notification.CompanyName},</p>
+
+                <div style=""background-color: #f9fafb; padding: 20px; border-radius: 8px; margin: 24px 0;"">
+                    <p style=""margin: 0;"">{escapedMessage}</p>
+                </div>
+
+                <p style=""font-weight: 600;"">No action is needed from you.</p>
+                <p>We'll be in touch when we have candidates to share.</p>
+
+                <p style=""margin-top: 32px; color: #6b7280;"">— The Bixo Team</p>
+            </body>
+            </html>";
+    }
+
     private static string BuildAdminNewShortlistEmailBody(AdminNewShortlistNotification notification)
     {
         var techStack = notification.TechStack.Count > 0

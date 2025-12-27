@@ -55,6 +55,18 @@ public interface IShortlistService
     Task<NoMatchResult> MarkAsNoMatchAsync(Guid shortlistRequestId, Guid adminUserId, string reason);
 
     /// <summary>
+    /// Admin suggests adjustments to the brief when no suitable candidates found.
+    /// Sets status to AwaitingAdjustment and sends email to company.
+    /// </summary>
+    Task<SuggestAdjustmentResult> SuggestAdjustmentAsync(Guid shortlistRequestId, Guid adminUserId, string message);
+
+    /// <summary>
+    /// Admin extends the search window when more time is needed.
+    /// Keeps status as Processing and sends email to company.
+    /// </summary>
+    Task<ExtendSearchResult> ExtendSearchAsync(Guid shortlistRequestId, Guid adminUserId, string message, int extendDays);
+
+    /// <summary>
     /// Admin marks shortlist as paid (sets paymentStatus = paid).
     /// Allowed only when status = Delivered.
     /// </summary>
@@ -180,6 +192,19 @@ public class NoMatchResult
 {
     public bool Success { get; set; }
     public string? ErrorMessage { get; set; }
+}
+
+public class SuggestAdjustmentResult
+{
+    public bool Success { get; set; }
+    public string? ErrorMessage { get; set; }
+}
+
+public class ExtendSearchResult
+{
+    public bool Success { get; set; }
+    public string? ErrorMessage { get; set; }
+    public DateTime? NewDeadline { get; set; }
 }
 
 public class ShortlistEmailRecord

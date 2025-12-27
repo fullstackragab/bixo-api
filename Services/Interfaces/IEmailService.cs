@@ -27,6 +27,12 @@ public interface IEmailService
     /// <summary>Sent when no suitable candidates found</summary>
     Task SendShortlistNoMatchEmailAsync(ShortlistNoMatchNotification notification);
 
+    /// <summary>Sent when admin suggests adjusting the brief</summary>
+    Task SendShortlistAdjustmentSuggestedEmailAsync(ShortlistAdjustmentSuggestedNotification notification);
+
+    /// <summary>Sent when admin extends the search window</summary>
+    Task SendShortlistSearchExtendedEmailAsync(ShortlistSearchExtendedNotification notification);
+
     // === Recommendation Emails ===
 
     /// <summary>Sent to recommender when candidate requests a recommendation</summary>
@@ -149,4 +155,26 @@ public class RecommendationReceivedNotification
     public string Email { get; set; } = string.Empty;
     public string CandidateFirstName { get; set; } = string.Empty;
     public string RecommenderName { get; set; } = string.Empty;
+}
+
+/// <summary>Sent when admin suggests adjusting the brief</summary>
+public class ShortlistAdjustmentSuggestedNotification
+{
+    public string Email { get; set; } = string.Empty;
+    public string CompanyName { get; set; } = string.Empty;
+    public string RoleTitle { get; set; } = string.Empty;
+    public string Message { get; set; } = string.Empty;
+    public Guid ShortlistId { get; set; }
+    public string EditUrl { get; set; } = string.Empty;
+    public string CloseUrl { get; set; } = string.Empty;
+}
+
+/// <summary>Sent when admin extends the search window</summary>
+public class ShortlistSearchExtendedNotification
+{
+    public string Email { get; set; } = string.Empty;
+    public string CompanyName { get; set; } = string.Empty;
+    public string RoleTitle { get; set; } = string.Empty;
+    public string Message { get; set; } = string.Empty;
+    public Guid ShortlistId { get; set; }
 }

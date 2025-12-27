@@ -893,6 +893,53 @@ public class AdminController : ControllerBase
     }
 
     /// <summary>
+    /// Admin suggests adjustments to the brief when no suitable candidates found.
+    /// Sets status to AwaitingAdjustment and sends email to company.
+    /// </summary>
+    [HttpPost("shortlists/{id}/suggest-adjustment")]
+    public async Task<ActionResult<ApiResponse>> SuggestAdjustment(Guid id, [FromBody] SuggestAdjustmentRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Message))
+        {
+            return BadRequest(ApiResponse.Fail("Message is required"));
+        }
+
+        var result = await _shortlistService.SuggestAdjustmentAsync(id, GetAdminUserId(), request.Message);
+
+        if (!result.Success)
+        {
+            return BadRequest(ApiResponse.Fail(result.ErrorMessage ?? "Failed to suggest adjustment"));
+        }
+
+        return Ok(ApiResponse.Ok("Adjustment suggestion sent to company."));
+    }
+
+    /// <summary>
+    /// Admin extends the search window when more time is needed.
+    /// Keeps status as Processing and sends email to company.
+    /// </summary>
+    [HttpPost("shortlists/{id}/extend-search")]
+    public async Task<ActionResult<ApiResponse<ExtendSearchResponse>>> ExtendSearch(Guid id, [FromBody] ExtendSearchRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Message))
+        {
+            return BadRequest(ApiResponse<ExtendSearchResponse>.Fail("Message is required"));
+        }
+
+        var result = await _shortlistService.ExtendSearchAsync(id, GetAdminUserId(), request.Message, request.ExtendDays);
+
+        if (!result.Success)
+        {
+            return BadRequest(ApiResponse<ExtendSearchResponse>.Fail(result.ErrorMessage ?? "Failed to extend search"));
+        }
+
+        return Ok(ApiResponse<ExtendSearchResponse>.Ok(new ExtendSearchResponse
+        {
+            NewDeadline = result.NewDeadline
+        }, "Search window extended. Company has been notified."));
+    }
+
+    /// <summary>
     /// Get email history for a shortlist (shows all sent emails including resends).
     /// </summary>
     [HttpGet("shortlists/{id}/emails")]
@@ -1439,6 +1486,27 @@ public class MarkAsNoMatchRequest
 {
     /// <summary>Required explanation for why no suitable candidates were found</summary>
     public string Reason { get; set; } = string.Empty;
+}
+
+public class SuggestAdjustmentRequest
+{
+    /// <summary>Message to company suggesting how to adjust the brief</summary>
+    public string Message { get; set; } = string.Empty;
+}
+
+public class ExtendSearchRequest
+{
+    /// <summary>Message to company explaining the extension</summary>
+    public string Message { get; set; } = string.Empty;
+
+    /// <summary>Number of days to extend the search (1-30)</summary>
+    public int ExtendDays { get; set; } = 14;
+}
+
+public class ExtendSearchResponse
+{
+    /// <summary>New deadline after extension</summary>
+    public DateTime? NewDeadline { get; set; }
 }
 
 public class ProposeScopeRequest
