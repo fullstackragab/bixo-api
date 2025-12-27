@@ -10,6 +10,7 @@ public class EmailSettings
     public string AdminInboxEmail { get; set; } = string.Empty;
     public string RegisterFromEmail { get; set; } = string.Empty;
     public string RecommendationsFromEmail { get; set; } = "recommendations@bixo.io";
+    public string ShortlistFromEmail { get; set; } = "shortlist@bixo.io";
     public string DataResidency { get; set; } = "eu"; // "eu" or "global"
 
     /// <summary>Frontend URL for generating deep links in emails</summary>

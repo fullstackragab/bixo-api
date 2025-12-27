@@ -100,10 +100,67 @@ public class CompaniesController : ControllerBase
         return Ok(ApiResponse<List<SavedCandidateResponse>>.Ok(result));
     }
 
+    /// <summary>
+    /// Get a preview of the message that will be sent to a candidate.
+    /// Shows the exact message content without sending it.
+    /// </summary>
+    [HttpGet("talent/{candidateId}/message/preview")]
+    public async Task<ActionResult<ApiResponse<TalentMessagePreviewResponse>>> GetMessagePreview(Guid candidateId)
+    {
+        var companyId = GetCompanyId();
+        var preview = await GenerateMessagePreviewAsync(companyId, candidateId);
+
+        if (preview == null)
+        {
+            return NotFound(ApiResponse<TalentMessagePreviewResponse>.Fail("Candidate not found or not in your shortlists"));
+        }
+
+        return Ok(ApiResponse<TalentMessagePreviewResponse>.Ok(preview));
+    }
+
     [HttpPost("talent/{candidateId}/message")]
     public async Task<ActionResult<ApiResponse<TalentMessageResponse>>> SendMessageToCandidate(Guid candidateId)
     {
         var companyId = GetCompanyId();
+
+        // Generate the message preview first (validates candidate is in shortlist)
+        var preview = await GenerateMessagePreviewAsync(companyId, candidateId);
+
+        if (preview == null)
+        {
+            return StatusCode(403, ApiResponse<TalentMessageResponse>.Fail("Cannot message candidates outside of your shortlists"));
+        }
+
+        // Now save the message
+        using var connection = _db.CreateConnection();
+
+        var messageId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+
+        await connection.ExecuteAsync(@"
+            INSERT INTO shortlist_messages (id, shortlist_id, company_id, candidate_id, message, created_at)
+            VALUES (@Id, @ShortlistId, @CompanyId, @CandidateId, @Message, @CreatedAt)",
+            new
+            {
+                Id = messageId,
+                ShortlistId = preview.ShortlistId,
+                CompanyId = companyId,
+                CandidateId = candidateId,
+                Message = preview.Message,
+                CreatedAt = now
+            });
+
+        return Ok(ApiResponse<TalentMessageResponse>.Ok(new TalentMessageResponse
+        {
+            MessageId = messageId,
+            CandidateId = candidateId,
+            Message = preview.Message,
+            CreatedAt = now
+        }, "Message sent"));
+    }
+
+    private async Task<TalentMessagePreviewResponse?> GenerateMessagePreviewAsync(Guid companyId, Guid candidateId)
+    {
         using var connection = _db.CreateConnection();
 
         // Check if candidate is in any of this company's shortlists
@@ -118,7 +175,7 @@ public class CompaniesController : ControllerBase
 
         if (shortlistInfo == null)
         {
-            return StatusCode(403, ApiResponse<TalentMessageResponse>.Fail("Cannot message candidates outside of your shortlists"));
+            return null;
         }
 
         // Get candidate info
@@ -130,7 +187,7 @@ public class CompaniesController : ControllerBase
 
         if (candidate == null)
         {
-            return NotFound(ApiResponse<TalentMessageResponse>.Fail("Candidate not found"));
+            return null;
         }
 
         // Get candidate skills
@@ -160,31 +217,19 @@ You have been added to a shortlist for the role of {roleTitle} at {companyName}.
 
 Key matching skills: {skillsText}
 
-This is an informational message only. You cannot reply directly.";
+If you're interested in learning more, you can respond from your Bixo dashboard.";
 
-        var messageId = Guid.NewGuid();
-        var now = DateTime.UtcNow;
-
-        await connection.ExecuteAsync(@"
-            INSERT INTO shortlist_messages (id, shortlist_id, company_id, candidate_id, message, created_at)
-            VALUES (@Id, @ShortlistId, @CompanyId, @CandidateId, @Message, @CreatedAt)",
-            new
-            {
-                Id = messageId,
-                ShortlistId = shortlistId,
-                CompanyId = companyId,
-                CandidateId = candidateId,
-                Message = message,
-                CreatedAt = now
-            });
-
-        return Ok(ApiResponse<TalentMessageResponse>.Ok(new TalentMessageResponse
+        return new TalentMessagePreviewResponse
         {
-            MessageId = messageId,
             CandidateId = candidateId,
+            CandidateName = candidateName,
+            RoleTitle = roleTitle,
+            CompanyName = companyName,
+            ShortlistId = shortlistId,
             Message = message,
-            CreatedAt = now
-        }, "Message sent"));
+            IsEditable = false,
+            RecruiterNote = "By sending this message, the candidate will be able to respond via their dashboard (Interested / Not Interested)."
+        };
     }
 }
 
@@ -194,4 +239,18 @@ public class TalentMessageResponse
     public Guid CandidateId { get; set; }
     public string Message { get; set; } = string.Empty;
     public DateTime CreatedAt { get; set; }
+}
+
+public class TalentMessagePreviewResponse
+{
+    public Guid CandidateId { get; set; }
+    public string CandidateName { get; set; } = string.Empty;
+    public string RoleTitle { get; set; } = string.Empty;
+    public string CompanyName { get; set; } = string.Empty;
+    public Guid ShortlistId { get; set; }
+    public string Message { get; set; } = string.Empty;
+    /// <summary>Always false - message content cannot be edited by the recruiter</summary>
+    public bool IsEditable { get; set; } = false;
+    /// <summary>Note explaining what happens when the recruiter sends this message</summary>
+    public string RecruiterNote { get; set; } = string.Empty;
 }

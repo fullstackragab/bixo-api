@@ -413,6 +413,7 @@ This is an informational message only. You cannot reply directly.";
         // Get all messages for this shortlist with candidate info
         var messages = await connection.QueryAsync<dynamic>(@"
             SELECT sm.id, sm.candidate_id, sm.message, sm.created_at,
+                   sm.interest_status, sm.interest_responded_at,
                    ca.first_name, ca.last_name
             FROM shortlist_messages sm
             JOIN candidates ca ON ca.id = sm.candidate_id
@@ -426,7 +427,9 @@ This is an informational message only. You cannot reply directly.";
             CandidateId = (Guid)m.candidate_id,
             CandidateName = $"{m.first_name ?? ""} {m.last_name ?? ""}".Trim(),
             Message = (string)m.message,
-            CreatedAt = (DateTime)m.created_at
+            CreatedAt = (DateTime)m.created_at,
+            InterestStatus = (string?)m.interest_status,
+            InterestRespondedAt = (DateTime?)m.interest_responded_at
         }).ToList();
 
         return Ok(ApiResponse<List<ShortlistMessageDetailResponse>>.Ok(result));
@@ -440,6 +443,9 @@ public class ShortlistMessageDetailResponse
     public string CandidateName { get; set; } = string.Empty;
     public string Message { get; set; } = string.Empty;
     public DateTime CreatedAt { get; set; }
+    /// <summary>Candidate's response: interested, not_interested, interested_later, or null for no response</summary>
+    public string? InterestStatus { get; set; }
+    public DateTime? InterestRespondedAt { get; set; }
 }
 
 public class PayForShortlistRequest

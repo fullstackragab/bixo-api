@@ -631,7 +631,10 @@ public class EmailService : IEmailService
                 return;
             }
 
-            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
+            var fromEmail = !string.IsNullOrEmpty(_settings.ShortlistFromEmail)
+                ? _settings.ShortlistFromEmail
+                : _settings.FromEmail;
+            var from = new EmailAddress(fromEmail, _settings.FromName);
             var to = new EmailAddress(_settings.AdminInboxEmail);
             var subject = $"New shortlist request: {notification.RoleTitle} at {notification.CompanyName}";
             var htmlContent = BuildAdminNewShortlistEmailBody(notification);
