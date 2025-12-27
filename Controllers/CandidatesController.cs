@@ -182,8 +182,56 @@ public class CandidatesController : ControllerBase
     [HttpGet("messages/unread-count")]
     public async Task<ActionResult<ApiResponse<UnreadCountResponse>>> GetUnreadMessageCount()
     {
-        var count = await _messageService.GetUnreadCountAsync(GetUserId());
-        return Ok(ApiResponse<UnreadCountResponse>.Ok(new UnreadCountResponse { UnreadCount = count }));
+        var userId = GetUserId();
+
+        // Get unread count from regular messages
+        var regularCount = await _messageService.GetUnreadCountAsync(userId);
+
+        // Count unread shortlist messages and unique companies
+        using var connection = _db.CreateConnection();
+        var stats = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT
+                COUNT(*) as message_count,
+                COUNT(DISTINCT sm.company_id) as company_count
+            FROM shortlist_messages sm
+            JOIN candidates c ON c.id = sm.candidate_id
+            WHERE c.user_id = @UserId AND sm.is_read = FALSE",
+            new { UserId = userId });
+
+        var shortlistCount = (int)(stats?.message_count ?? 0);
+        var companyCount = (int)(stats?.company_count ?? 0);
+        var totalUnread = regularCount + shortlistCount;
+
+        // Generate banner copy based on context
+        string? bannerTitle = null;
+        string? bannerSubtitle = null;
+
+        if (totalUnread > 0)
+        {
+            if (companyCount > 0)
+            {
+                bannerTitle = companyCount == 1
+                    ? "A company is interested in your profile"
+                    : $"{companyCount} companies are interested in your profile";
+                bannerSubtitle = totalUnread == 1
+                    ? "You have 1 new message"
+                    : $"You have {totalUnread} new messages";
+            }
+            else
+            {
+                bannerTitle = totalUnread == 1
+                    ? "You have a new message"
+                    : $"You have {totalUnread} new messages";
+            }
+        }
+
+        return Ok(ApiResponse<UnreadCountResponse>.Ok(new UnreadCountResponse
+        {
+            UnreadCount = totalUnread,
+            CompanyCount = companyCount,
+            BannerTitle = bannerTitle,
+            BannerSubtitle = bannerSubtitle
+        }));
     }
 
     [HttpGet("messages")]
@@ -204,7 +252,7 @@ public class CandidatesController : ControllerBase
         if (candidateId != null)
         {
             var shortlistMessages = await connection.QueryAsync<dynamic>(@"
-                SELECT sm.id, sm.company_id, sm.message, sm.created_at,
+                SELECT sm.id, sm.company_id, sm.message, sm.created_at, sm.is_read,
                        sm.interest_status, sm.interest_responded_at,
                        c.company_name, c.user_id as company_user_id, sr.role_title
                 FROM shortlist_messages sm
@@ -224,7 +272,7 @@ public class CandidatesController : ControllerBase
                 ToUserName = "You",
                 Subject = $"{(string)m.role_title} at {(string)m.company_name}",
                 Content = (string)m.message,
-                IsRead = true, // Shortlist messages don't track read status currently
+                IsRead = (bool)(m.is_read ?? false),
                 CreatedAt = (DateTime)m.created_at,
                 InterestStatus = (string?)m.interest_status,
                 InterestRespondedAt = (DateTime?)m.interest_responded_at
@@ -236,6 +284,56 @@ public class CandidatesController : ControllerBase
         }
 
         return Ok(ApiResponse<List<MessageResponse>>.Ok(regularMessages));
+    }
+
+    /// <summary>
+    /// Mark a shortlist message as read.
+    /// </summary>
+    [HttpPost("messages/{messageId}/read")]
+    public async Task<ActionResult<ApiResponse>> MarkMessageAsRead(Guid messageId)
+    {
+        var userId = GetUserId();
+        using var connection = _db.CreateConnection();
+
+        // Update if this message belongs to this user's candidate profile
+        var rowsAffected = await connection.ExecuteAsync(@"
+            UPDATE shortlist_messages sm
+            SET is_read = TRUE
+            FROM candidates c
+            WHERE sm.id = @MessageId
+              AND sm.candidate_id = c.id
+              AND c.user_id = @UserId",
+            new { MessageId = messageId, UserId = userId });
+
+        if (rowsAffected == 0)
+        {
+            // Try marking a regular message as read
+            await _messageService.MarkAsReadAsync(userId, messageId);
+        }
+
+        return Ok(ApiResponse.Ok("Message marked as read"));
+    }
+
+    /// <summary>
+    /// Mark all shortlist messages as read.
+    /// </summary>
+    [HttpPost("messages/read-all")]
+    public async Task<ActionResult<ApiResponse>> MarkAllMessagesAsRead()
+    {
+        var userId = GetUserId();
+        using var connection = _db.CreateConnection();
+
+        // Mark all shortlist messages as read for this candidate
+        await connection.ExecuteAsync(@"
+            UPDATE shortlist_messages sm
+            SET is_read = TRUE
+            FROM candidates c
+            WHERE sm.candidate_id = c.id
+              AND c.user_id = @UserId
+              AND sm.is_read = FALSE",
+            new { UserId = userId });
+
+        return Ok(ApiResponse.Ok("All messages marked as read"));
     }
 
     [HttpGet("shortlist-messages")]
@@ -286,9 +384,10 @@ public class CandidatesController : ControllerBase
 
     /// <summary>
     /// Respond to a shortlist message with interest status.
+    /// Returns confirmation message for the candidate to display.
     /// </summary>
     [HttpPost("messages/{messageId}/respond")]
-    public async Task<ActionResult<ApiResponse<ShortlistMessageResponse>>> RespondToMessage(
+    public async Task<ActionResult<ApiResponse<InterestResponseResult>>> RespondToMessage(
         Guid messageId,
         [FromBody] RespondToMessageRequest request)
     {
@@ -309,39 +408,53 @@ public class CandidatesController : ControllerBase
         var validStatuses = new[] { "interested", "not_interested", "interested_later" };
         if (!validStatuses.Contains(request.InterestStatus))
         {
-            return BadRequest(ApiResponse<ShortlistMessageResponse>.Fail(
+            return BadRequest(ApiResponse<InterestResponseResult>.Fail(
                 "Invalid interest status. Must be: interested, not_interested, or interested_later"));
         }
 
-        // Verify message belongs to this candidate and update
+        // Get the message and verify it belongs to this candidate
+        var message = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT sm.id, sm.shortlist_id, sm.company_id, sm.message, sm.created_at,
+                   sm.is_system, sm.message_type,
+                   c.company_name, c.user_id as company_user_id, sr.role_title
+            FROM shortlist_messages sm
+            JOIN companies c ON c.id = sm.company_id
+            JOIN shortlist_requests sr ON sr.id = sm.shortlist_id
+            WHERE sm.id = @MessageId AND sm.candidate_id = @CandidateId",
+            new { MessageId = messageId, CandidateId = candidateId });
+
+        if (message == null)
+        {
+            return NotFound(ApiResponse<InterestResponseResult>.Fail("Message not found"));
+        }
+
         var now = DateTime.UtcNow;
-        var rowsAffected = await connection.ExecuteAsync(@"
-            UPDATE shortlist_messages
+        Guid shortlistId = (Guid)message.shortlist_id;
+
+        // 1. Update shortlist_candidates (SOURCE OF TRUTH)
+        await connection.ExecuteAsync(@"
+            UPDATE shortlist_candidates
             SET interest_status = @InterestStatus, interest_responded_at = @Now
-            WHERE id = @MessageId AND candidate_id = @CandidateId",
+            WHERE shortlist_request_id = @ShortlistId AND candidate_id = @CandidateId",
             new
             {
-                MessageId = messageId,
+                ShortlistId = shortlistId,
                 CandidateId = candidateId,
                 InterestStatus = request.InterestStatus,
                 Now = now
             });
 
-        if (rowsAffected == 0)
-        {
-            return NotFound(ApiResponse<ShortlistMessageResponse>.Fail("Message not found"));
-        }
-
-        // Get updated message with company info
-        var message = await connection.QueryFirstAsync<dynamic>(@"
-            SELECT sm.id, sm.shortlist_id, sm.company_id, sm.message, sm.created_at,
-                   sm.is_system, sm.message_type, sm.interest_status, sm.interest_responded_at,
-                   c.company_name, c.user_id as company_user_id, sr.role_title
-            FROM shortlist_messages sm
-            JOIN companies c ON c.id = sm.company_id
-            JOIN shortlist_requests sr ON sr.id = sm.shortlist_id
-            WHERE sm.id = @MessageId",
-            new { MessageId = messageId });
+        // 2. Also update shortlist_messages (for message-level tracking)
+        await connection.ExecuteAsync(@"
+            UPDATE shortlist_messages
+            SET interest_status = @InterestStatus, interest_responded_at = @Now
+            WHERE id = @MessageId",
+            new
+            {
+                MessageId = messageId,
+                InterestStatus = request.InterestStatus,
+                Now = now
+            });
 
         // Create notification for company
         var statusText = request.InterestStatus switch
@@ -362,22 +475,35 @@ public class CandidatesController : ControllerBase
             "Candidate responded",
             $"{candidateName} {statusText} the {message.role_title} opportunity");
 
-        var result = new ShortlistMessageResponse
+        // Build confirmation message for candidate
+        var confirmationMessage = request.InterestStatus switch
         {
-            Id = (Guid)message.id,
-            ShortlistId = (Guid)message.shortlist_id,
-            CompanyId = (Guid)message.company_id,
-            CompanyName = (string)message.company_name,
-            RoleTitle = (string?)message.role_title ?? "",
-            Message = (string)message.message,
-            CreatedAt = (DateTime)message.created_at,
-            IsSystem = message.is_system ?? false,
-            MessageType = message.message_type ?? "company",
-            InterestStatus = (string?)message.interest_status,
-            InterestRespondedAt = (DateTime?)message.interest_responded_at
+            "interested" => "Your interest has been sent. The company has been notified.",
+            "not_interested" => "Your response has been recorded. The company has been notified.",
+            "interested_later" => "Your response has been recorded. The company has been notified that you may be interested later.",
+            _ => "Your response has been recorded."
         };
 
-        return Ok(ApiResponse<ShortlistMessageResponse>.Ok(result, "Response recorded"));
+        var result = new InterestResponseResult
+        {
+            Message = new ShortlistMessageResponse
+            {
+                Id = (Guid)message.id,
+                ShortlistId = shortlistId,
+                CompanyId = (Guid)message.company_id,
+                CompanyName = (string)message.company_name,
+                RoleTitle = (string?)message.role_title ?? "",
+                Message = (string)message.message,
+                CreatedAt = (DateTime)message.created_at,
+                IsSystem = message.is_system ?? false,
+                MessageType = message.message_type ?? "company",
+                InterestStatus = request.InterestStatus,
+                InterestRespondedAt = now
+            },
+            Confirmation = confirmationMessage
+        };
+
+        return Ok(ApiResponse<InterestResponseResult>.Ok(result));
     }
 }
 
@@ -395,6 +521,11 @@ public class SetVisibilityRequest
 public class UnreadCountResponse
 {
     public int UnreadCount { get; set; }
+    public int CompanyCount { get; set; }
+    /// <summary>Banner title for dashboard, e.g. "2 companies are interested in your profile"</summary>
+    public string? BannerTitle { get; set; }
+    /// <summary>Banner subtitle, e.g. "You have 3 new messages"</summary>
+    public string? BannerSubtitle { get; set; }
 }
 
 public class ShortlistMessageResponse
@@ -417,4 +548,12 @@ public class RespondToMessageRequest
 {
     /// <summary>Must be: interested, not_interested, or interested_later</summary>
     public string InterestStatus { get; set; } = string.Empty;
+}
+
+public class InterestResponseResult
+{
+    /// <summary>The updated message with interest status</summary>
+    public ShortlistMessageResponse Message { get; set; } = null!;
+    /// <summary>Confirmation message to display to the candidate (ephemeral, not stored)</summary>
+    public string Confirmation { get; set; } = string.Empty;
 }

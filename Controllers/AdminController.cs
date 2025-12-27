@@ -20,19 +20,22 @@ public class AdminController : ControllerBase
     private readonly IRecommendationService _recommendationService;
     private readonly IS3StorageService _s3Service;
     private readonly ICandidateService _candidateService;
+    private readonly IPricingService _pricingService;
 
     public AdminController(
         IDbConnectionFactory db,
         IShortlistService shortlistService,
         IRecommendationService recommendationService,
         IS3StorageService s3Service,
-        ICandidateService candidateService)
+        ICandidateService candidateService,
+        IPricingService pricingService)
     {
         _db = db;
         _shortlistService = shortlistService;
         _recommendationService = recommendationService;
         _s3Service = s3Service;
         _candidateService = candidateService;
+        _pricingService = pricingService;
     }
 
     [HttpGet("dashboard")]
@@ -770,6 +773,51 @@ public class AdminController : ControllerBase
         }
 
         return Ok(ApiResponse.Ok("Rankings updated"));
+    }
+
+    /// <summary>
+    /// Get suggested price for a shortlist based on seniority, candidate count, and rarity.
+    /// </summary>
+    [HttpGet("shortlists/{id}/pricing/suggest")]
+    public async Task<ActionResult<ApiResponse<PricingSuggestionResponse>>> GetSuggestedPrice(
+        Guid id,
+        [FromQuery] bool isRare = false)
+    {
+        using var connection = _db.CreateConnection();
+
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT sr.id, sr.seniority_required,
+                   (SELECT COUNT(*) FROM shortlist_candidates sc
+                    WHERE sc.shortlist_request_id = sr.id AND sc.admin_approved = TRUE) as candidate_count
+            FROM shortlist_requests sr
+            WHERE sr.id = @Id",
+            new { Id = id });
+
+        if (shortlist == null)
+        {
+            return NotFound(ApiResponse<PricingSuggestionResponse>.Fail("Shortlist not found"));
+        }
+
+        var seniority = shortlist.seniority_required != null
+            ? (SeniorityLevel?)(int)shortlist.seniority_required
+            : null;
+        var candidateCount = (int)(shortlist.candidate_count ?? 0);
+
+        var suggestion = _pricingService.CalculateSuggestedPrice(seniority, candidateCount, isRare);
+
+        return Ok(ApiResponse<PricingSuggestionResponse>.Ok(new PricingSuggestionResponse
+        {
+            SuggestedPrice = suggestion.SuggestedPrice,
+            Seniority = seniority?.ToString(),
+            CandidateCount = candidateCount,
+            IsRare = isRare,
+            Breakdown = new PricingBreakdownResponse
+            {
+                BasePrice = suggestion.Factors.BasePrice,
+                SizeAdjustment = suggestion.Factors.SizeAdjustment,
+                RarePremium = suggestion.Factors.RarePremium
+            }
+        }));
     }
 
     /// <summary>
@@ -1519,6 +1567,22 @@ public class ProposeScopeRequest
 
     /// <summary>Optional notes about the scope</summary>
     public string? Notes { get; set; }
+}
+
+public class PricingSuggestionResponse
+{
+    public decimal SuggestedPrice { get; set; }
+    public string? Seniority { get; set; }
+    public int CandidateCount { get; set; }
+    public bool IsRare { get; set; }
+    public PricingBreakdownResponse Breakdown { get; set; } = new();
+}
+
+public class PricingBreakdownResponse
+{
+    public decimal BasePrice { get; set; }
+    public decimal SizeAdjustment { get; set; }
+    public decimal RarePremium { get; set; }
 }
 
 public class ShortlistEmailHistoryResponse

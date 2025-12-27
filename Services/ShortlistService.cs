@@ -356,6 +356,7 @@ public class ShortlistService : IShortlistService
         var candidates = await connection.QueryAsync<dynamic>(@"
             SELECT sc.id, sc.candidate_id, sc.match_score, sc.match_reason, sc.rank, sc.admin_approved,
                    sc.is_new, sc.previously_recommended_in, sc.re_inclusion_reason,
+                   sc.interest_status, sc.interest_responded_at,
                    c.first_name, c.last_name, c.desired_role, c.seniority_estimate, c.availability
             FROM shortlist_candidates sc
             JOIN candidates c ON c.id = sc.candidate_id
@@ -413,7 +414,9 @@ public class ShortlistService : IShortlistService
                 Availability = (Availability)c.availability,
                 IsNew = isNew,
                 PreviouslyRecommendedIn = c.previously_recommended_in as Guid?,
-                ReInclusionReason = c.re_inclusion_reason as string
+                ReInclusionReason = c.re_inclusion_reason as string,
+                InterestStatus = c.interest_status as string,
+                InterestRespondedAt = c.interest_responded_at as DateTime?
             });
         }
 
@@ -422,6 +425,14 @@ public class ShortlistService : IShortlistService
         var locationCountry = shortlist.location_country as string;
         var locationCity = shortlist.location_city as string;
         var locationTimezone = shortlist.location_timezone as string;
+
+        // Calculate interest status counts for tabs
+        var interestCounts = new InterestStatusCounts
+        {
+            Interested = candidatesList.Count(c => c.InterestStatus == "interested"),
+            Declined = candidatesList.Count(c => c.InterestStatus == "not_interested"),
+            NoResponse = candidatesList.Count(c => c.InterestStatus == null || c.InterestStatus == "interested_later")
+        };
 
         return new ShortlistDetailResponse
         {
@@ -445,6 +456,7 @@ public class ShortlistService : IShortlistService
             CompletedAt = shortlist.completed_at != null ? (DateTime?)shortlist.completed_at : null,
             CandidatesCount = candidatesList.Count,
             Candidates = candidatesList,
+            InterestCounts = interestCounts,
             PreviousRequestId = shortlist.previous_request_id as Guid?,
             PricingType = shortlist.pricing_type as string ?? "new",
             FollowUpDiscount = shortlist.follow_up_discount as decimal? ?? 0,

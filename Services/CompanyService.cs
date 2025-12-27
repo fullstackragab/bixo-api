@@ -404,12 +404,9 @@ public class CompanyService : ICompanyService
                     ViewedAt = DateTime.UtcNow
                 });
 
-            // Notify candidate
-            await _notificationService.CreateNotificationAsync(
-                (Guid)candidate.user_id,
-                "profile_view",
-                "Someone viewed your profile",
-                "A company viewed your profile");
+            // Note: We intentionally do NOT notify candidates about profile views.
+            // Profile views are low-signal events that create noise.
+            // Candidates are only notified about high-signal events like shortlisting.
         }
 
         // Only generate CV URL if candidate is in shortlist

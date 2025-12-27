@@ -369,7 +369,7 @@ You have been added to a shortlist for the role of {roleTitle} at {companyName}.
 
 Key matching skills: {skillsText}
 
-This is an informational message only. You cannot reply directly.";
+If you're interested in learning more, you can respond from your Bixo dashboard.";
 
             await connection.ExecuteAsync(@"
                 INSERT INTO shortlist_messages (id, shortlist_id, company_id, candidate_id, message, created_at)

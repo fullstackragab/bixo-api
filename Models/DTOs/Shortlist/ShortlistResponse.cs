@@ -138,9 +138,35 @@ public class ShortlistCandidateResponse
     /// Display label for UI (e.g., "New" or "Previously recommended")
     /// </summary>
     public string StatusLabel => IsNew ? "New" : "Previously recommended";
+
+    /// <summary>Candidate's interest response: interested, not_interested, interested_later, or null for pending</summary>
+    public string? InterestStatus { get; set; }
+
+    /// <summary>When the candidate responded</summary>
+    public DateTime? InterestRespondedAt { get; set; }
+
+    /// <summary>Display label for interest status</summary>
+    public string InterestLabel => InterestStatus switch
+    {
+        "interested" => "Interested",
+        "not_interested" => "Not interested",
+        "interested_later" => "Interested later",
+        _ => "Pending response"
+    };
 }
 
 public class ShortlistDetailResponse : ShortlistResponse
 {
     public List<ShortlistCandidateResponse> Candidates { get; set; } = new();
+
+    /// <summary>Counts by interest status for tab display</summary>
+    public InterestStatusCounts InterestCounts { get; set; } = new();
+}
+
+public class InterestStatusCounts
+{
+    public int Interested { get; set; }
+    public int Declined { get; set; }
+    public int NoResponse { get; set; }
+    public int Total => Interested + Declined + NoResponse;
 }
