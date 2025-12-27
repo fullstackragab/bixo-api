@@ -457,6 +457,7 @@ public class CompanyService : ICompanyService
             Availability = (Availability)(int)candidate.availability,
             SeniorityEstimate = candidate.seniority_estimate != null ? (SeniorityLevel)(int)candidate.seniority_estimate : null,
             Skills = skillResponses,
+            Capabilities = CapabilityMapping.DeriveCapabilities(skills.Select(s => (string)s.skill_name)),
             RecommendationsCount = recommendationsCount,
             LastActiveAt = (DateTime)candidate.last_active_at,
             IsSaved = isSaved,

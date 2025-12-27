@@ -12,4 +12,17 @@ public interface ICandidateService
     Task ProcessCvUploadAsync(Guid userId, string fileKey, string originalFileName);
     Task UpdateSkillsAsync(Guid userId, UpdateSkillsRequest request);
     Task SetVisibilityAsync(Guid userId, bool visible);
+
+    /// <summary>
+    /// Admin: Re-trigger CV parsing for a candidate. Used when initial parse failed.
+    /// </summary>
+    Task<CvReparseResult> ReparseCvAsync(Guid candidateId);
+}
+
+public class CvReparseResult
+{
+    public bool Success { get; set; }
+    public string Status { get; set; } = string.Empty;
+    public string? Error { get; set; }
+    public int SkillsExtracted { get; set; }
 }

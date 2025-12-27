@@ -13,17 +13,20 @@ public class CandidateService : ICandidateService
     private readonly IDbConnectionFactory _db;
     private readonly IS3StorageService _s3Service;
     private readonly ICvParsingService _cvParsingService;
+    private readonly IEmailService _emailService;
     private readonly ILogger<CandidateService> _logger;
 
     public CandidateService(
         IDbConnectionFactory db,
         IS3StorageService s3Service,
         ICvParsingService cvParsingService,
+        IEmailService emailService,
         ILogger<CandidateService> logger)
     {
         _db = db;
         _s3Service = s3Service;
         _cvParsingService = cvParsingService;
+        _emailService = emailService;
         _logger = logger;
     }
 
@@ -34,7 +37,7 @@ public class CandidateService : ICandidateService
         var candidate = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
             SELECT c.id, c.first_name, c.last_name, c.linkedin_url, c.cv_file_key, c.cv_original_file_name,
                    c.desired_role, c.location_preference, c.remote_preference, c.availability,
-                   c.open_to_opportunities, c.profile_visible, c.seniority_estimate, c.created_at,
+                   c.open_to_opportunities, c.profile_visible, c.profile_approved_at, c.seniority_estimate, c.created_at,
                    u.email, u.last_active_at,
                    cl.country AS location_country,
                    cl.city AS location_city,
@@ -103,6 +106,7 @@ public class CandidateService : ICandidateService
             Availability = (Availability)(int)candidate.availability,
             OpenToOpportunities = (bool)candidate.open_to_opportunities,
             ProfileVisible = (bool)candidate.profile_visible,
+            ProfileApprovedAt = candidate.profile_approved_at as DateTime?,
             SeniorityEstimate = candidate.seniority_estimate != null ? (SeniorityLevel?)(int)candidate.seniority_estimate : null,
             Skills = skills.Select(s => new CandidateSkillResponse
             {
@@ -218,6 +222,7 @@ public class CandidateService : ICandidateService
                 location_preference = COALESCE(@LocationPreference, location_preference),
                 remote_preference = COALESCE(@RemotePreference, remote_preference),
                 availability = COALESCE(@Availability, availability),
+                seniority_estimate = COALESCE(@SeniorityEstimate, seniority_estimate),
                 open_to_opportunities = COALESCE(@OpenToOpportunities, open_to_opportunities),
                 profile_visible = COALESCE(@ProfileVisible, profile_visible),
                 updated_at = @Now
@@ -232,6 +237,7 @@ public class CandidateService : ICandidateService
                 request.LocationPreference,
                 RemotePreference = request.RemotePreference.HasValue ? (int?)request.RemotePreference.Value : null,
                 Availability = request.Availability.HasValue ? (int?)request.Availability.Value : null,
+                SeniorityEstimate = request.SeniorityEstimate.HasValue ? (int?)request.SeniorityEstimate.Value : null,
                 request.OpenToOpportunities,
                 request.ProfileVisible,
                 Now = DateTime.UtcNow
@@ -357,20 +363,22 @@ public class CandidateService : ICandidateService
     {
         using var connection = _db.CreateConnection();
 
-        var candidateId = await connection.ExecuteScalarAsync<Guid>(
-            "SELECT id FROM candidates WHERE user_id = @UserId",
+        var candidate = await connection.QueryFirstOrDefaultAsync<dynamic>(
+            "SELECT id, first_name, last_name, email FROM candidates c JOIN users u ON u.id = c.user_id WHERE c.user_id = @UserId",
             new { UserId = userId });
 
-        if (candidateId == Guid.Empty)
+        if (candidate == null)
         {
             throw new InvalidOperationException("Candidate not found");
         }
+
+        var candidateId = (Guid)candidate.id;
 
         var oldCvKey = await connection.ExecuteScalarAsync<string?>(
             "SELECT cv_file_key FROM candidates WHERE id = @Id",
             new { Id = candidateId });
 
-        if (!string.IsNullOrEmpty(oldCvKey))
+        if (!string.IsNullOrEmpty(oldCvKey) && oldCvKey != fileKey)
         {
             try
             {
@@ -382,10 +390,13 @@ public class CandidateService : ICandidateService
             }
         }
 
+        // Save CV reference and mark as pending parse
         await connection.ExecuteAsync(@"
             UPDATE candidates SET
                 cv_file_key = @FileKey,
                 cv_original_file_name = @FileName,
+                cv_parse_status = 'pending',
+                cv_parse_error = NULL,
                 updated_at = @Now
             WHERE id = @Id",
             new { Id = candidateId, FileKey = fileKey, FileName = originalFileName, Now = DateTime.UtcNow });
@@ -395,12 +406,38 @@ public class CandidateService : ICandidateService
             using var stream = await _s3Service.DownloadFileAsync(fileKey);
             var parseResult = await _cvParsingService.ParseCvAsync(stream, originalFileName);
 
+            var hasSkills = parseResult.Skills != null && parseResult.Skills.Count > 0;
+            var hasBasicInfo = !string.IsNullOrEmpty(parseResult.FirstName) || !string.IsNullOrEmpty(parseResult.LastName);
+
+            // Determine parse status
+            string parseStatus;
+            string? parseError = null;
+
+            if (hasSkills)
+            {
+                parseStatus = "success";
+            }
+            else if (hasBasicInfo)
+            {
+                parseStatus = "partial";
+                parseError = "Skills could not be extracted from CV";
+            }
+            else
+            {
+                parseStatus = "failed";
+                parseError = "Could not extract information from CV - may be image-based or encrypted";
+            }
+
+            // Update basic info (only if we got something)
             await connection.ExecuteAsync(@"
                 UPDATE candidates SET
                     first_name = COALESCE(NULLIF(@FirstName, ''), first_name),
                     last_name = COALESCE(NULLIF(@LastName, ''), last_name),
                     seniority_estimate = COALESCE(@Seniority, seniority_estimate),
                     parsed_profile_json = @ParsedJson,
+                    cv_parse_status = @ParseStatus,
+                    cv_parse_error = @ParseError,
+                    cv_parsed_at = @Now,
                     updated_at = @Now
                 WHERE id = @Id",
                 new
@@ -410,35 +447,84 @@ public class CandidateService : ICandidateService
                     LastName = parseResult.LastName,
                     Seniority = parseResult.SeniorityEstimate.HasValue ? (int?)parseResult.SeniorityEstimate.Value : null,
                     ParsedJson = parseResult.RawJson,
+                    ParseStatus = parseStatus,
+                    ParseError = parseError,
                     Now = DateTime.UtcNow
                 });
 
-            // Delete old CV-parsed skills (non-verified) before inserting new ones
-            await connection.ExecuteAsync(@"
-                DELETE FROM candidate_skills
-                WHERE candidate_id = @CandidateId AND is_verified = FALSE",
-                new { CandidateId = candidateId });
-
-            foreach (var skill in parseResult.Skills)
+            // IMPORTANT: Only update skills if parsing succeeded with skills
+            // Never delete existing skills on failed/partial parse
+            if (hasSkills)
             {
+                // Delete old CV-parsed skills (non-verified) before inserting new ones
                 await connection.ExecuteAsync(@"
-                    INSERT INTO candidate_skills (id, candidate_id, skill_name, confidence_score, category, is_verified)
-                    VALUES (@Id, @CandidateId, @SkillName, @Confidence, @Category, FALSE)
-                    ON CONFLICT (candidate_id, skill_name) DO UPDATE SET
-                        confidence_score = EXCLUDED.confidence_score,
-                        category = EXCLUDED.category",
-                    new
-                    {
-                        Id = Guid.NewGuid(),
-                        CandidateId = candidateId,
-                        SkillName = skill.Name,
-                        Confidence = skill.ConfidenceScore,
-                        Category = (int)skill.Category
-                    });
+                    DELETE FROM candidate_skills
+                    WHERE candidate_id = @CandidateId AND is_verified = FALSE",
+                    new { CandidateId = candidateId });
+
+                foreach (var skill in parseResult.Skills)
+                {
+                    await connection.ExecuteAsync(@"
+                        INSERT INTO candidate_skills (id, candidate_id, skill_name, confidence_score, category, is_verified)
+                        VALUES (@Id, @CandidateId, @SkillName, @Confidence, @Category, FALSE)
+                        ON CONFLICT (candidate_id, skill_name) DO UPDATE SET
+                            confidence_score = EXCLUDED.confidence_score,
+                            category = EXCLUDED.category",
+                        new
+                        {
+                            Id = Guid.NewGuid(),
+                            CandidateId = candidateId,
+                            SkillName = skill.Name,
+                            Confidence = skill.ConfidenceScore,
+                            Category = (int)skill.Category
+                        });
+                }
+
+                _logger.LogInformation("CV parsed successfully for candidate {CandidateId}: {SkillCount} skills extracted",
+                    candidateId, parseResult.Skills.Count);
+            }
+            else
+            {
+                // Notify admin about failed/partial parse
+                var candidateName = $"{candidate.first_name} {candidate.last_name}".Trim();
+                if (string.IsNullOrEmpty(candidateName)) candidateName = (string?)candidate.email ?? "Unknown";
+
+                await _emailService.SendAdminNotificationAsync(
+                    "CV Parse Review Needed",
+                    $"CV parsing {parseStatus} for candidate: {candidateName}\n\n" +
+                    $"Candidate ID: {candidateId}\n" +
+                    $"File: {originalFileName}\n" +
+                    $"Issue: {parseError}\n\n" +
+                    "Please review the CV manually in the admin dashboard.");
+
+                _logger.LogWarning("CV parse {Status} for candidate {CandidateId}: {Error}",
+                    parseStatus, candidateId, parseError);
             }
         }
         catch (Exception ex)
         {
+            // Update status to failed
+            await connection.ExecuteAsync(@"
+                UPDATE candidates SET
+                    cv_parse_status = 'failed',
+                    cv_parse_error = @Error,
+                    cv_parsed_at = @Now,
+                    updated_at = @Now
+                WHERE id = @Id",
+                new { Id = candidateId, Error = ex.Message, Now = DateTime.UtcNow });
+
+            // Notify admin
+            var candidateName = $"{candidate.first_name} {candidate.last_name}".Trim();
+            if (string.IsNullOrEmpty(candidateName)) candidateName = (string?)candidate.email ?? "Unknown";
+
+            await _emailService.SendAdminNotificationAsync(
+                "CV Parse Failed",
+                $"CV parsing failed for candidate: {candidateName}\n\n" +
+                $"Candidate ID: {candidateId}\n" +
+                $"File: {originalFileName}\n" +
+                $"Error: {ex.Message}\n\n" +
+                "Please review the CV manually in the admin dashboard.");
+
             _logger.LogError(ex, "Failed to parse CV for candidate {CandidateId}", candidateId);
         }
     }
@@ -519,5 +605,50 @@ public class CandidateService : ICandidateService
         await connection.ExecuteAsync(@"
             UPDATE candidates SET profile_visible = @Visible, updated_at = @Now WHERE user_id = @UserId",
             new { UserId = userId, Visible = visible, Now = DateTime.UtcNow });
+    }
+
+    public async Task<CvReparseResult> ReparseCvAsync(Guid candidateId)
+    {
+        using var connection = _db.CreateConnection();
+
+        var candidate = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT c.id, c.user_id, c.cv_file_key, c.cv_original_file_name, c.first_name, c.last_name, u.email
+            FROM candidates c
+            JOIN users u ON u.id = c.user_id
+            WHERE c.id = @CandidateId",
+            new { CandidateId = candidateId });
+
+        if (candidate == null)
+        {
+            return new CvReparseResult { Success = false, Status = "failed", Error = "Candidate not found" };
+        }
+
+        var cvFileKey = candidate.cv_file_key as string;
+        var originalFileName = candidate.cv_original_file_name as string ?? "cv.pdf";
+
+        if (string.IsNullOrEmpty(cvFileKey))
+        {
+            return new CvReparseResult { Success = false, Status = "failed", Error = "Candidate has no CV uploaded" };
+        }
+
+        // Use existing ProcessCvUploadAsync logic
+        await ProcessCvUploadAsync((Guid)candidate.user_id, cvFileKey, originalFileName);
+
+        // Fetch the updated parse status
+        var result = await connection.QueryFirstAsync<dynamic>(
+            "SELECT cv_parse_status, cv_parse_error FROM candidates WHERE id = @CandidateId",
+            new { CandidateId = candidateId });
+
+        var skillsCount = await connection.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM candidate_skills WHERE candidate_id = @CandidateId",
+            new { CandidateId = candidateId });
+
+        return new CvReparseResult
+        {
+            Success = result.cv_parse_status == "success",
+            Status = (string)result.cv_parse_status,
+            Error = result.cv_parse_error as string,
+            SkillsExtracted = skillsCount
+        };
     }
 }

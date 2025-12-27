@@ -20,6 +20,7 @@ public class UpdateCandidateRequest
     public RemotePreference? RemotePreference { get; set; }
 
     public Availability? Availability { get; set; }
+    public SeniorityLevel? SeniorityEstimate { get; set; }
     public bool? OpenToOpportunities { get; set; }
     public bool? ProfileVisible { get; set; }
 }

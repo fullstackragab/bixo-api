@@ -19,17 +19,20 @@ public class AdminController : ControllerBase
     private readonly IShortlistService _shortlistService;
     private readonly IRecommendationService _recommendationService;
     private readonly IS3StorageService _s3Service;
+    private readonly ICandidateService _candidateService;
 
     public AdminController(
         IDbConnectionFactory db,
         IShortlistService shortlistService,
         IRecommendationService recommendationService,
-        IS3StorageService s3Service)
+        IS3StorageService s3Service,
+        ICandidateService candidateService)
     {
         _db = db;
         _shortlistService = shortlistService;
         _recommendationService = recommendationService;
         _s3Service = s3Service;
+        _candidateService = candidateService;
     }
 
     [HttpGet("dashboard")]
@@ -82,7 +85,7 @@ public class AdminController : ControllerBase
         var sql = $@"
             SELECT c.id, c.user_id, u.email, c.first_name, c.last_name, c.desired_role,
                    c.availability, c.seniority_estimate, c.profile_visible, c.created_at, u.last_active_at,
-                   c.cv_file_key, c.cv_original_file_name,
+                   c.cv_file_key, c.cv_original_file_name, c.cv_parse_status, c.cv_parse_error,
                    (SELECT COUNT(*) FROM candidate_skills WHERE candidate_id = c.id) as skills_count,
                    (SELECT COUNT(*) FROM candidate_profile_views WHERE candidate_id = c.id) as profile_views_count
             FROM candidates c
@@ -107,6 +110,8 @@ public class AdminController : ControllerBase
             ProfileVisible = (bool)c.profile_visible,
             HasCv = !string.IsNullOrEmpty(c.cv_file_key as string),
             CvFileName = c.cv_original_file_name as string,
+            CvParseStatus = c.cv_parse_status as string,
+            CvParseError = c.cv_parse_error as string,
             SkillsCount = (int)(c.skills_count ?? 0),
             ProfileViewsCount = (int)(c.profile_views_count ?? 0),
             CreatedAt = (DateTime)c.created_at,
@@ -135,6 +140,7 @@ public class AdminController : ControllerBase
                    c.desired_role, c.location_preference, c.remote_preference,
                    c.availability, c.seniority_estimate, c.profile_visible, c.open_to_opportunities,
                    c.cv_file_key, c.cv_original_file_name,
+                   c.cv_parse_status, c.cv_parse_error, c.cv_parsed_at,
                    c.created_at, c.updated_at, u.last_active_at,
                    cl.country AS location_country, cl.city AS location_city,
                    cl.timezone AS location_timezone, cl.willing_to_relocate
@@ -182,6 +188,9 @@ public class AdminController : ControllerBase
             OpenToOpportunities = (bool)candidate.open_to_opportunities,
             HasCv = !string.IsNullOrEmpty(candidate.cv_file_key as string),
             CvFileName = candidate.cv_original_file_name as string,
+            CvParseStatus = candidate.cv_parse_status as string,
+            CvParseError = candidate.cv_parse_error as string,
+            CvParsedAt = candidate.cv_parsed_at as DateTime?,
             Location = new AdminCandidateLocationResponse
             {
                 Country = candidate.location_country as string,
@@ -276,7 +285,7 @@ public class AdminController : ControllerBase
     }
 
     /// <summary>
-    /// Approve a candidate after CV review. Sets profile_visible = true.
+    /// Approve a candidate after CV review. Sets profile_visible = true and records approval.
     /// </summary>
     [HttpPost("candidates/{id}/approve")]
     public async Task<ActionResult<ApiResponse>> ApproveCandidate(Guid id)
@@ -298,23 +307,34 @@ public class AdminController : ControllerBase
             return BadRequest(ApiResponse.Fail("Cannot approve candidate without CV"));
         }
 
-        await connection.ExecuteAsync(
-            "UPDATE candidates SET profile_visible = TRUE, updated_at = @Now WHERE id = @Id",
-            new { Now = DateTime.UtcNow, Id = id });
+        var adminUserId = GetAdminUserId();
+        await connection.ExecuteAsync(@"
+            UPDATE candidates SET
+                profile_visible = TRUE,
+                profile_approved_at = @Now,
+                profile_approved_by = @ApprovedBy,
+                updated_at = @Now
+            WHERE id = @Id",
+            new { Now = DateTime.UtcNow, ApprovedBy = adminUserId, Id = id });
 
         return Ok(ApiResponse.Ok("Candidate approved and now visible for matching"));
     }
 
     /// <summary>
-    /// Reject/hide a candidate. Sets profile_visible = false.
+    /// Reject/hide a candidate. Sets profile_visible = false and clears approval.
     /// </summary>
     [HttpPost("candidates/{id}/reject")]
     public async Task<ActionResult<ApiResponse>> RejectCandidate(Guid id)
     {
         using var connection = _db.CreateConnection();
 
-        var rowsAffected = await connection.ExecuteAsync(
-            "UPDATE candidates SET profile_visible = FALSE, updated_at = @Now WHERE id = @Id",
+        var rowsAffected = await connection.ExecuteAsync(@"
+            UPDATE candidates SET
+                profile_visible = FALSE,
+                profile_approved_at = NULL,
+                profile_approved_by = NULL,
+                updated_at = @Now
+            WHERE id = @Id",
             new { Now = DateTime.UtcNow, Id = id });
 
         if (rowsAffected == 0)
@@ -369,6 +389,30 @@ public class AdminController : ControllerBase
             DownloadUrl = downloadUrl,
             FileName = candidate.cv_original_file_name as string ?? "cv.pdf"
         }));
+    }
+
+    /// <summary>
+    /// Re-trigger CV parsing for a candidate. Use when initial parse failed or returned no skills.
+    /// </summary>
+    [HttpPost("candidates/{id}/reparse-cv")]
+    public async Task<ActionResult<ApiResponse<AdminCvReparseResponse>>> ReparseCandidateCv(Guid id)
+    {
+        var result = await _candidateService.ReparseCvAsync(id);
+
+        var response = new AdminCvReparseResponse
+        {
+            Success = result.Success,
+            Status = result.Status,
+            Error = result.Error,
+            SkillsExtracted = result.SkillsExtracted
+        };
+
+        if (!result.Success)
+        {
+            return Ok(ApiResponse<AdminCvReparseResponse>.Ok(response, $"CV parse {result.Status}: {result.Error}"));
+        }
+
+        return Ok(ApiResponse<AdminCvReparseResponse>.Ok(response, $"CV parsed successfully. {result.SkillsExtracted} skills extracted."));
     }
 
     [HttpGet("companies")]
@@ -1091,6 +1135,8 @@ public class AdminCandidateResponse
     public bool ProfileVisible { get; set; }
     public bool HasCv { get; set; }
     public string? CvFileName { get; set; }
+    public string? CvParseStatus { get; set; }
+    public string? CvParseError { get; set; }
     public int SkillsCount { get; set; }
     public int ProfileViewsCount { get; set; }
     public DateTime CreatedAt { get; set; }
@@ -1123,6 +1169,9 @@ public class AdminCandidateDetailResponse
     public bool OpenToOpportunities { get; set; }
     public bool HasCv { get; set; }
     public string? CvFileName { get; set; }
+    public string? CvParseStatus { get; set; }
+    public string? CvParseError { get; set; }
+    public DateTime? CvParsedAt { get; set; }
     public AdminCandidateLocationResponse? Location { get; set; }
     public List<AdminCandidateSkillResponse> Skills { get; set; } = new();
     public List<AdminCandidateRecommendationResponse> Recommendations { get; set; } = new();
@@ -1412,4 +1461,12 @@ public class ShortlistEmailHistoryResponse
     public string SentTo { get; set; } = string.Empty;
     public Guid? SentBy { get; set; }
     public bool IsResend { get; set; }
+}
+
+public class AdminCvReparseResponse
+{
+    public bool Success { get; set; }
+    public string Status { get; set; } = string.Empty;
+    public string? Error { get; set; }
+    public int SkillsExtracted { get; set; }
 }

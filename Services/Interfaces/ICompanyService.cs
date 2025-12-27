@@ -24,6 +24,7 @@ public class CandidateDetailResponse
     public Models.Enums.Availability Availability { get; set; }
     public Models.Enums.SeniorityLevel? SeniorityEstimate { get; set; }
     public List<Models.DTOs.Candidate.CandidateSkillResponse> Skills { get; set; } = new();
+    public Dictionary<string, List<string>> Capabilities { get; set; } = new();
     public int RecommendationsCount { get; set; }
     public DateTime LastActiveAt { get; set; }
     public bool IsSaved { get; set; }

@@ -26,7 +26,28 @@ public class CandidateProfileResponse
     public Availability Availability { get; set; }
     public bool OpenToOpportunities { get; set; }
     public bool ProfileVisible { get; set; }
+    public DateTime? ProfileApprovedAt { get; set; }
     public SeniorityLevel? SeniorityEstimate { get; set; }
+
+    /// <summary>
+    /// Profile status for UI display:
+    /// - "approved" = ProfileVisible && ProfileApprovedAt != null
+    /// - "under_review" = !ProfileVisible && has CV
+    /// - "paused" = !ProfileVisible && ProfileApprovedAt != null (was approved, now hidden)
+    /// - "incomplete" = no CV uploaded
+    /// </summary>
+    public string ProfileStatus => DetermineProfileStatus();
+
+    private string DetermineProfileStatus()
+    {
+        if (ProfileVisible && ProfileApprovedAt.HasValue)
+            return "approved";
+        if (!ProfileVisible && ProfileApprovedAt.HasValue)
+            return "paused";
+        if (!string.IsNullOrEmpty(CvFileName))
+            return "under_review";
+        return "incomplete";
+    }
     public List<CandidateSkillResponse> Skills { get; set; } = new();
     public GroupedSkillsResponse GroupedSkills { get; set; } = new();
 

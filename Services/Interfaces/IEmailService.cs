@@ -10,6 +10,9 @@ public interface IEmailService
     Task SendAdminNewCompanyNotificationAsync(AdminNewCompanyNotification notification);
     Task SendAdminNewShortlistNotificationAsync(AdminNewShortlistNotification notification);
 
+    /// <summary>Generic admin notification for issues that need attention</summary>
+    Task SendAdminNotificationAsync(string subject, string message);
+
     // === Shortlist Status Email Events (idempotent, sent once per event type) ===
 
     /// <summary>Sent when pricing is ready for company review</summary>

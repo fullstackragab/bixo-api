@@ -637,6 +637,49 @@ public class EmailService : IEmailService
         }
     }
 
+    public async Task SendAdminNotificationAsync(string subject, string message)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_settings.ApiKey) || string.IsNullOrEmpty(_settings.AdminInboxEmail))
+            {
+                _logger.LogWarning("Email settings not configured, skipping admin notification: {Subject}", subject);
+                return;
+            }
+
+            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
+            var to = new EmailAddress(_settings.AdminInboxEmail);
+            var emailSubject = $"[Alert] {subject}";
+            var htmlContent = $@"
+                <html>
+                <body style=""font-family: Arial, sans-serif; line-height: 1.6; color: #333;"">
+                    <h2 style=""color: #dc2626;"">{subject}</h2>
+                    <hr style=""border: 1px solid #e5e7eb;"" />
+                    <pre style=""white-space: pre-wrap; font-family: monospace; background: #f9fafb; padding: 16px; border-radius: 6px;"">{message}</pre>
+                    <p style=""margin-top: 24px; color: #6b7280;"">— Bixo System</p>
+                </body>
+                </html>";
+
+            var msg = MailHelper.CreateSingleEmail(from, to, emailSubject, null, htmlContent);
+
+            var response = await _client.SendEmailAsync(msg);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("Admin notification sent: {Subject}", subject);
+            }
+            else
+            {
+                var responseBody = await response.Body.ReadAsStringAsync();
+                _logger.LogError("SendGrid API returned {StatusCode}: {Body}", response.StatusCode, responseBody);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send admin notification: {Subject}", subject);
+        }
+    }
+
     public async Task SendShortlistNoMatchEmailAsync(ShortlistNoMatchNotification notification)
     {
         try
