@@ -125,7 +125,8 @@ public class AdminController : ControllerBase
 
         var sql = $@"
             SELECT c.id, c.user_id, u.email, c.first_name, c.last_name, c.desired_role,
-                   c.availability, c.seniority_estimate, c.profile_visible, c.created_at, u.last_active_at,
+                   c.availability, c.seniority_estimate, c.profile_visible, c.profile_approved_at,
+                   c.created_at, u.last_active_at,
                    c.cv_file_key, c.cv_original_file_name, c.cv_parse_status, c.cv_parse_error,
                    c.github_url, c.github_summary, c.github_summary_requested_at, c.github_summary_enabled,
                    (SELECT COUNT(*) FROM candidate_skills WHERE candidate_id = c.id) as skills_count,
@@ -150,6 +151,7 @@ public class AdminController : ControllerBase
             Availability = (Availability)(c.availability ?? 0),
             SeniorityEstimate = c.seniority_estimate != null ? (SeniorityLevel?)(int)c.seniority_estimate : null,
             ProfileVisible = (bool)c.profile_visible,
+            ProfileApprovedAt = c.profile_approved_at as DateTime?,
             HasCv = !string.IsNullOrEmpty(c.cv_file_key as string),
             CvFileName = c.cv_original_file_name as string,
             CvParseStatus = c.cv_parse_status as string,
@@ -186,7 +188,8 @@ public class AdminController : ControllerBase
                    c.github_summary, c.github_summary_generated_at, c.github_summary_requested_at,
                    c.github_summary_enabled,
                    c.desired_role, c.location_preference, c.remote_preference,
-                   c.availability, c.seniority_estimate, c.profile_visible, c.open_to_opportunities,
+                   c.availability, c.seniority_estimate, c.profile_visible, c.profile_approved_at,
+                   c.open_to_opportunities,
                    c.cv_file_key, c.cv_original_file_name,
                    c.cv_parse_status, c.cv_parse_error, c.cv_parsed_at,
                    c.created_at, c.updated_at, u.last_active_at,
@@ -238,6 +241,7 @@ public class AdminController : ControllerBase
             Availability = (Availability)(candidate.availability ?? 0),
             SeniorityEstimate = candidate.seniority_estimate != null ? (SeniorityLevel?)(int)candidate.seniority_estimate : null,
             ProfileVisible = (bool)candidate.profile_visible,
+            ProfileApprovedAt = candidate.profile_approved_at as DateTime?,
             OpenToOpportunities = (bool)candidate.open_to_opportunities,
             HasCv = !string.IsNullOrEmpty(candidate.cv_file_key as string),
             CvFileName = candidate.cv_original_file_name as string,
@@ -439,6 +443,158 @@ public class AdminController : ControllerBase
         });
 
         return Ok(ApiResponse.Ok("Candidate rejected and hidden from matching"));
+    }
+
+    /// <summary>
+    /// Bulk approve multiple candidates. Sets profile_visible = true and records approval for each.
+    /// Sends notifications and emails to all approved candidates.
+    /// </summary>
+    [HttpPost("candidates/bulk-approve")]
+    public async Task<ActionResult<ApiResponse<BulkApproveResponse>>> BulkApproveCandidates([FromBody] BulkCandidateRequest request)
+    {
+        if (request.CandidateIds == null || request.CandidateIds.Count == 0)
+        {
+            return BadRequest(ApiResponse<BulkApproveResponse>.Fail("No candidate IDs provided"));
+        }
+
+        using var connection = _db.CreateConnection();
+        var adminUserId = GetAdminUserId();
+        var now = DateTime.UtcNow;
+        var approvedCount = 0;
+
+        // Get candidates that can be approved (have CV and not already visible)
+        var candidates = await connection.QueryAsync<dynamic>(@"
+            SELECT c.id, c.cv_file_key, c.first_name, c.user_id, c.profile_visible, u.email
+            FROM candidates c
+            JOIN users u ON u.id = c.user_id
+            WHERE c.id = ANY(@Ids)",
+            new { Ids = request.CandidateIds.ToArray() });
+
+        foreach (var candidate in candidates)
+        {
+            // Skip if already visible or no CV
+            if ((bool)candidate.profile_visible)
+                continue;
+
+            if (string.IsNullOrEmpty(candidate.cv_file_key as string))
+                continue;
+
+            // Approve the candidate
+            await connection.ExecuteAsync(@"
+                UPDATE candidates SET
+                    profile_visible = TRUE,
+                    profile_approved_at = @Now,
+                    profile_approved_by = @ApprovedBy,
+                    updated_at = @Now
+                WHERE id = @Id",
+                new { Now = now, ApprovedBy = adminUserId, Id = (Guid)candidate.id });
+
+            approvedCount++;
+
+            // Send in-app notification (fire and forget)
+            _ = _notificationService.CreateNotificationAsync(
+                (Guid)candidate.user_id,
+                "profile_approved",
+                "Your profile has been approved",
+                "Your profile is now visible to companies. You may start receiving interest and shortlist notifications."
+            );
+
+            // Send approval email (fire and forget)
+            _ = _emailService.SendCandidateProfileActiveEmailAsync(new CandidateProfileActiveNotification
+            {
+                Email = (string)candidate.email,
+                FirstName = candidate.first_name as string,
+                ProfileUrl = $"{_emailSettings.FrontendUrl}/candidate/profile"
+            });
+        }
+
+        return Ok(ApiResponse<BulkApproveResponse>.Ok(new BulkApproveResponse
+        {
+            ApprovedCount = approvedCount
+        }, $"{approvedCount} candidate(s) approved"));
+    }
+
+    /// <summary>
+    /// Bulk generate GitHub summaries for multiple candidates.
+    /// Queues summary generation for candidates with GitHub URLs who don't have summaries yet.
+    /// </summary>
+    [HttpPost("candidates/bulk-generate-summaries")]
+    public async Task<ActionResult<ApiResponse<BulkGenerateSummariesResponse>>> BulkGenerateSummaries([FromBody] BulkCandidateRequest request)
+    {
+        if (request.CandidateIds == null || request.CandidateIds.Count == 0)
+        {
+            return BadRequest(ApiResponse<BulkGenerateSummariesResponse>.Fail("No candidate IDs provided"));
+        }
+
+        using var connection = _db.CreateConnection();
+        var queuedCount = 0;
+
+        // Get candidates eligible for summary generation (have GitHub URL, no summary yet)
+        var candidates = await connection.QueryAsync<dynamic>(@"
+            SELECT c.id, c.github_url, c.github_summary, c.first_name, c.user_id, u.email
+            FROM candidates c
+            JOIN users u ON u.id = c.user_id
+            WHERE c.id = ANY(@Ids)
+              AND c.github_url IS NOT NULL
+              AND c.github_url != ''
+              AND c.github_summary IS NULL",
+            new { Ids = request.CandidateIds.ToArray() });
+
+        foreach (var candidate in candidates)
+        {
+            var candidateId = (Guid)candidate.id;
+            var githubUrl = (string)candidate.github_url;
+
+            // Generate summary asynchronously (fire and forget)
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var result = await _gitHubEnrichmentService.GenerateSummaryAsync(githubUrl);
+                    if (result != null)
+                    {
+                        using var conn = _db.CreateConnection();
+                        await conn.ExecuteAsync(@"
+                            UPDATE candidates
+                            SET github_summary = @Summary,
+                                github_summary_generated_at = @GeneratedAt,
+                                updated_at = @GeneratedAt
+                            WHERE id = @Id",
+                            new
+                            {
+                                Summary = result.Summary,
+                                GeneratedAt = DateTime.UtcNow,
+                                Id = candidateId
+                            });
+
+                        // Notify candidate
+                        var profileUrl = $"{_emailSettings.FrontendUrl}/candidate/profile";
+                        await _emailService.SendPublicWorkSummaryReadyEmailAsync(new PublicWorkSummaryReadyNotification
+                        {
+                            Email = (string)candidate.email,
+                            FirstName = candidate.first_name as string,
+                            ProfileUrl = profileUrl
+                        });
+
+                        await _notificationService.CreateNotificationAsync(
+                            (Guid)candidate.user_id,
+                            "public_work_summary_ready",
+                            "Your public work summary is ready for review");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to generate GitHub summary for candidate {CandidateId}", candidateId);
+                }
+            });
+
+            queuedCount++;
+        }
+
+        return Ok(ApiResponse<BulkGenerateSummariesResponse>.Ok(new BulkGenerateSummariesResponse
+        {
+            QueuedCount = queuedCount
+        }, $"{queuedCount} summary generation(s) queued"));
     }
 
     [HttpPut("candidates/{id}/seniority")]
@@ -693,6 +849,82 @@ public class AdminController : ControllerBase
         };
 
         return Ok(ApiResponse<AdminCompanyPagedResponse>.Ok(result));
+    }
+
+    [HttpGet("companies/{companyId}")]
+    public async Task<ActionResult<ApiResponse<AdminCompanyDetailResponse>>> GetCompany(Guid companyId)
+    {
+        using var connection = _db.CreateConnection();
+
+        var company = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT c.id, c.user_id, u.email, c.company_name, c.industry, c.company_size, c.website,
+                   c.logo_file_key, c.subscription_tier, c.subscription_expires_at, c.messages_remaining,
+                   c.stripe_customer_id, c.created_at, c.updated_at, u.last_active_at,
+                   cl.country AS location_country, cl.city AS location_city, cl.timezone AS location_timezone,
+                   (SELECT COUNT(*) FROM shortlist_requests WHERE company_id = c.id) as shortlists_count,
+                   (SELECT COUNT(*) FROM saved_candidates WHERE company_id = c.id) as saved_candidates_count,
+                   (SELECT COUNT(*) FROM candidate_profile_views WHERE company_id = c.id) as profile_views_count,
+                   (SELECT COALESCE(SUM(amount_captured), 0) FROM payments WHERE company_id = c.id AND status = @PaymentCaptured) as total_spent
+            FROM companies c
+            JOIN users u ON u.id = c.user_id
+            LEFT JOIN company_locations cl ON cl.company_id = c.id
+            WHERE c.id = @Id",
+            new { Id = companyId, PaymentCaptured = (int)PaymentStatus.Captured });
+
+        if (company == null)
+        {
+            return NotFound(ApiResponse<AdminCompanyDetailResponse>.Fail("Company not found"));
+        }
+
+        // Get recent shortlists
+        var recentShortlists = await connection.QueryAsync<dynamic>(@"
+            SELECT id, role_title, status, created_at, completed_at,
+                   (SELECT COUNT(*) FROM shortlist_candidates WHERE shortlist_request_id = sr.id AND admin_approved = TRUE) as candidates_count
+            FROM shortlist_requests sr
+            WHERE company_id = @CompanyId
+            ORDER BY created_at DESC
+            LIMIT 5",
+            new { CompanyId = companyId });
+
+        var result = new AdminCompanyDetailResponse
+        {
+            Id = (Guid)company.id,
+            UserId = (Guid)company.user_id,
+            Email = (string)company.email,
+            CompanyName = company.company_name as string ?? string.Empty,
+            Industry = company.industry as string,
+            CompanySize = company.company_size as string,
+            Website = company.website as string,
+            HasLogo = !string.IsNullOrEmpty(company.logo_file_key as string),
+            SubscriptionTier = (SubscriptionTier)(int)company.subscription_tier,
+            SubscriptionExpiresAt = company.subscription_expires_at as DateTime?,
+            MessagesRemaining = (int)company.messages_remaining,
+            HasStripeCustomer = !string.IsNullOrEmpty(company.stripe_customer_id as string),
+            Location = new AdminCompanyLocationResponse
+            {
+                Country = company.location_country as string,
+                City = company.location_city as string,
+                Timezone = company.location_timezone as string
+            },
+            ShortlistsCount = (int)(company.shortlists_count ?? 0),
+            SavedCandidatesCount = (int)(company.saved_candidates_count ?? 0),
+            ProfileViewsCount = (int)(company.profile_views_count ?? 0),
+            TotalSpent = company.total_spent as decimal? ?? 0,
+            RecentShortlists = recentShortlists.Select(s => new AdminCompanyShortlistSummary
+            {
+                Id = (Guid)s.id,
+                RoleTitle = (string)s.role_title,
+                Status = (ShortlistStatus)(int)s.status,
+                CandidatesCount = (int)(s.candidates_count ?? 0),
+                CreatedAt = (DateTime)s.created_at,
+                CompletedAt = s.completed_at as DateTime?
+            }).ToList(),
+            CreatedAt = (DateTime)company.created_at,
+            UpdatedAt = company.updated_at as DateTime?,
+            LastActiveAt = (DateTime)company.last_active_at
+        };
+
+        return Ok(ApiResponse<AdminCompanyDetailResponse>.Ok(result));
     }
 
     [HttpPut("companies/{companyId}/messages")]
@@ -1458,6 +1690,7 @@ public class AdminCandidateResponse
     public Availability Availability { get; set; }
     public SeniorityLevel? SeniorityEstimate { get; set; }
     public bool ProfileVisible { get; set; }
+    public DateTime? ProfileApprovedAt { get; set; }
     public bool HasCv { get; set; }
     public string? CvFileName { get; set; }
     public string? CvParseStatus { get; set; }
@@ -1472,6 +1705,26 @@ public class AdminCandidateResponse
     public string? GitHubSummary { get; set; }
     public DateTime? GitHubSummaryRequestedAt { get; set; }
     public bool GitHubSummaryEnabled { get; set; }
+
+    /// <summary>
+    /// Profile status for UI display:
+    /// - "approved" = ProfileVisible && ProfileApprovedAt != null
+    /// - "under_review" = !ProfileVisible && has CV
+    /// - "paused" = !ProfileVisible && ProfileApprovedAt != null (was approved, now hidden)
+    /// - "incomplete" = no CV uploaded
+    /// </summary>
+    public string ProfileStatus => DetermineProfileStatus();
+
+    private string DetermineProfileStatus()
+    {
+        if (ProfileVisible && ProfileApprovedAt.HasValue)
+            return "approved";
+        if (!ProfileVisible && ProfileApprovedAt.HasValue)
+            return "paused";
+        if (HasCv)
+            return "under_review";
+        return "incomplete";
+    }
 
     /// <summary>
     /// Computed status: unavailable, not_requested, pending, ready, enabled
@@ -1539,6 +1792,7 @@ public class AdminCandidateDetailResponse
     public Availability Availability { get; set; }
     public SeniorityLevel? SeniorityEstimate { get; set; }
     public bool ProfileVisible { get; set; }
+    public DateTime? ProfileApprovedAt { get; set; }
     public bool OpenToOpportunities { get; set; }
     public bool HasCv { get; set; }
     public string? CvFileName { get; set; }
@@ -1551,6 +1805,26 @@ public class AdminCandidateDetailResponse
     public DateTime CreatedAt { get; set; }
     public DateTime? UpdatedAt { get; set; }
     public DateTime LastActiveAt { get; set; }
+
+    /// <summary>
+    /// Profile status for UI display:
+    /// - "approved" = ProfileVisible && ProfileApprovedAt != null
+    /// - "under_review" = !ProfileVisible && has CV
+    /// - "paused" = !ProfileVisible && ProfileApprovedAt != null (was approved, now hidden)
+    /// - "incomplete" = no CV uploaded
+    /// </summary>
+    public string ProfileStatus => DetermineProfileStatus();
+
+    private string DetermineProfileStatus()
+    {
+        if (ProfileVisible && ProfileApprovedAt.HasValue)
+            return "approved";
+        if (!ProfileVisible && ProfileApprovedAt.HasValue)
+            return "paused";
+        if (HasCv)
+            return "under_review";
+        return "incomplete";
+    }
 }
 
 public class AdminCandidateLocationResponse
@@ -1609,6 +1883,48 @@ public class AdminCompanyPagedResponse
     public int Page { get; set; }
     public int PageSize { get; set; }
     public int TotalPages { get; set; }
+}
+
+public class AdminCompanyDetailResponse
+{
+    public Guid Id { get; set; }
+    public Guid UserId { get; set; }
+    public string Email { get; set; } = string.Empty;
+    public string CompanyName { get; set; } = string.Empty;
+    public string? Industry { get; set; }
+    public string? CompanySize { get; set; }
+    public string? Website { get; set; }
+    public bool HasLogo { get; set; }
+    public SubscriptionTier SubscriptionTier { get; set; }
+    public DateTime? SubscriptionExpiresAt { get; set; }
+    public int MessagesRemaining { get; set; }
+    public bool HasStripeCustomer { get; set; }
+    public AdminCompanyLocationResponse? Location { get; set; }
+    public int ShortlistsCount { get; set; }
+    public int SavedCandidatesCount { get; set; }
+    public int ProfileViewsCount { get; set; }
+    public decimal TotalSpent { get; set; }
+    public List<AdminCompanyShortlistSummary> RecentShortlists { get; set; } = new();
+    public DateTime CreatedAt { get; set; }
+    public DateTime? UpdatedAt { get; set; }
+    public DateTime LastActiveAt { get; set; }
+}
+
+public class AdminCompanyLocationResponse
+{
+    public string? Country { get; set; }
+    public string? City { get; set; }
+    public string? Timezone { get; set; }
+}
+
+public class AdminCompanyShortlistSummary
+{
+    public Guid Id { get; set; }
+    public string RoleTitle { get; set; } = string.Empty;
+    public ShortlistStatus Status { get; set; }
+    public int CandidatesCount { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime? CompletedAt { get; set; }
 }
 
 public class UpdateMessagesRequest
@@ -1899,4 +2215,19 @@ public class GitHubSummaryResponse
     public int PublicRepoCount { get; set; }
     public List<string> TopLanguages { get; set; } = new();
     public DateTime GeneratedAt { get; set; }
+}
+
+public class BulkCandidateRequest
+{
+    public List<Guid> CandidateIds { get; set; } = new();
+}
+
+public class BulkApproveResponse
+{
+    public int ApprovedCount { get; set; }
+}
+
+public class BulkGenerateSummariesResponse
+{
+    public int QueuedCount { get; set; }
 }
