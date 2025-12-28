@@ -1630,4 +1630,78 @@ public class EmailService : IEmailService
             </body>
             </html>";
     }
+
+    // === Password Reset Emails ===
+
+    public async Task SendPasswordResetEmailAsync(PasswordResetNotification notification)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_settings.ApiKey))
+            {
+                _logger.LogWarning("Email settings not configured, skipping password reset email");
+                return;
+            }
+
+            var fromEmail = !string.IsNullOrEmpty(_settings.RegisterFromEmail)
+                ? _settings.RegisterFromEmail
+                : _settings.FromEmail;
+            var from = new EmailAddress(fromEmail, _settings.FromName);
+            var to = new EmailAddress(notification.Email);
+            var subject = "Reset your Bixo password";
+            var htmlContent = BuildPasswordResetEmailBody(notification);
+
+            var msg = MailHelper.CreateSingleEmail(from, to, subject, null, htmlContent);
+            msg.SetReplyTo(new EmailAddress(fromEmail, _settings.FromName));
+
+            var response = await _client.SendEmailAsync(msg);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("Password reset email sent to: {Email}", notification.Email);
+            }
+            else
+            {
+                var responseBody = await response.Body.ReadAsStringAsync();
+                _logger.LogError("SendGrid API returned {StatusCode}: {Body}", response.StatusCode, responseBody);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send password reset email to: {Email}", notification.Email);
+        }
+    }
+
+    private static string BuildPasswordResetEmailBody(PasswordResetNotification notification)
+    {
+        var greeting = !string.IsNullOrEmpty(notification.FirstName)
+            ? $"Hi {notification.FirstName}"
+            : "Hi";
+
+        return $@"
+            <html>
+            <body style=""font-family: Arial, sans-serif; line-height: 1.8; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;"">
+                <h1 style=""color: #2563eb; margin-bottom: 24px;"">Reset your password</h1>
+
+                <p>{greeting},</p>
+
+                <p>We received a request to reset your Bixo password. Click the button below to create a new password:</p>
+
+                <p style=""margin: 32px 0;"">
+                    <a href=""{notification.ResetUrl}"" style=""background-color: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;"">Reset password</a>
+                </p>
+
+                <p style=""color: #6b7280;"">This link will expire in <strong>1 hour</strong> for security reasons.</p>
+
+                <p style=""margin-top: 24px;"">If you didn't request a password reset, you can safely ignore this email. Your password will remain unchanged.</p>
+
+                <p style=""margin-top: 32px;"">— The Bixo Team</p>
+
+                <hr style=""border: none; border-top: 1px solid #e5e7eb; margin: 32px 0;"" />
+
+                <p style=""color: #9ca3af; font-size: 12px;"">If the button doesn't work, copy and paste this link into your browser:<br />
+                <a href=""{notification.ResetUrl}"" style=""color: #6b7280; word-break: break-all;"">{notification.ResetUrl}</a></p>
+            </body>
+            </html>";
+    }
 }

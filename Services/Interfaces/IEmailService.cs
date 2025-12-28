@@ -66,6 +66,11 @@ public interface IEmailService
 
     /// <summary>Sent to admin when company declines scope/pricing</summary>
     Task SendAdminScopeDeclinedNotificationAsync(AdminScopeDeclinedNotification notification);
+
+    // === Password Reset Emails ===
+
+    /// <summary>Sent when user requests a password reset</summary>
+    Task SendPasswordResetEmailAsync(PasswordResetNotification notification);
 }
 
 public class SupportNotification
@@ -284,4 +289,12 @@ public class AdminScopeDeclinedNotification
     public string RoleTitle { get; set; } = string.Empty;
     public string? DeclineReason { get; set; }
     public DateTime DeclinedAt { get; set; }
+}
+
+/// <summary>Sent when user requests a password reset</summary>
+public class PasswordResetNotification
+{
+    public string Email { get; set; } = string.Empty;
+    public string? FirstName { get; set; }
+    public string ResetUrl { get; set; } = string.Empty;
 }

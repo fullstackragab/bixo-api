@@ -268,6 +268,98 @@ public class AuthService : IAuthService
         };
     }
 
+    public async Task RequestPasswordResetAsync(string email)
+    {
+        using var connection = _db.CreateConnection();
+
+        var user = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT u.id, u.email, c.first_name
+            FROM users u
+            LEFT JOIN candidates c ON c.user_id = u.id
+            WHERE u.email = @Email AND u.is_active = TRUE",
+            new { Email = email.ToLower() });
+
+        // Always return success to prevent email enumeration
+        if (user == null)
+        {
+            return;
+        }
+
+        // Generate secure token
+        var token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(64));
+        var expiresAt = DateTime.UtcNow.AddHours(1);
+
+        await connection.ExecuteAsync(@"
+            INSERT INTO password_reset_tokens (id, user_id, token, expires_at, created_at)
+            VALUES (@Id, @UserId, @Token, @ExpiresAt, @CreatedAt)",
+            new
+            {
+                Id = Guid.NewGuid(),
+                UserId = (Guid)user.id,
+                Token = token,
+                ExpiresAt = expiresAt,
+                CreatedAt = DateTime.UtcNow
+            });
+
+        // Send password reset email (fire and forget)
+        var resetUrl = $"{_emailSettings.FrontendUrl}/reset-password?token={Uri.EscapeDataString(token)}";
+        _ = _emailService.SendPasswordResetEmailAsync(new PasswordResetNotification
+        {
+            Email = (string)user.email,
+            FirstName = user.first_name as string,
+            ResetUrl = resetUrl
+        });
+    }
+
+    public async Task ResetPasswordAsync(string token, string newPassword)
+    {
+        using var connection = _db.CreateConnection();
+
+        var resetToken = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT id, user_id, expires_at, used_at
+            FROM password_reset_tokens
+            WHERE token = @Token",
+            new { Token = token });
+
+        if (resetToken == null)
+        {
+            throw new InvalidOperationException("Invalid or expired reset token");
+        }
+
+        if (resetToken.used_at != null)
+        {
+            throw new InvalidOperationException("This reset link has already been used");
+        }
+
+        if ((DateTime)resetToken.expires_at < DateTime.UtcNow)
+        {
+            throw new InvalidOperationException("This reset link has expired");
+        }
+
+        var userId = (Guid)resetToken.user_id;
+
+        // Update password
+        await connection.ExecuteAsync(@"
+            UPDATE users SET password_hash = @PasswordHash, updated_at = @Now
+            WHERE id = @Id",
+            new
+            {
+                Id = userId,
+                PasswordHash = BCrypt.Net.BCrypt.HashPassword(newPassword),
+                Now = DateTime.UtcNow
+            });
+
+        // Mark token as used
+        await connection.ExecuteAsync(@"
+            UPDATE password_reset_tokens SET used_at = @Now WHERE id = @Id",
+            new { Now = DateTime.UtcNow, Id = (Guid)resetToken.id });
+
+        // Revoke all refresh tokens for security
+        await connection.ExecuteAsync(@"
+            UPDATE refresh_tokens SET revoked_at = @Now WHERE user_id = @UserId AND revoked_at IS NULL",
+            new { Now = DateTime.UtcNow, UserId = userId });
+    }
+
     private async Task<AuthResponse> GenerateAuthResponseAsync(Guid userId, string email, UserType userType, Guid? candidateId, Guid? companyId)
     {
         var accessToken = GenerateAccessToken(userId, email, userType, candidateId, companyId);

@@ -96,4 +96,26 @@ public class AuthController : ControllerBase
 
         return Ok(ApiResponse<UserResponse>.Ok(user));
     }
+
+    [HttpPost("forgot-password")]
+    public async Task<ActionResult<ApiResponse>> ForgotPassword([FromBody] ForgotPasswordRequest request)
+    {
+        await _authService.RequestPasswordResetAsync(request.Email);
+        // Always return success to prevent email enumeration
+        return Ok(ApiResponse.Ok("If an account exists with this email, you will receive a password reset link"));
+    }
+
+    [HttpPost("reset-password")]
+    public async Task<ActionResult<ApiResponse>> ResetPassword([FromBody] ResetPasswordRequest request)
+    {
+        try
+        {
+            await _authService.ResetPasswordAsync(request.Token, request.NewPassword);
+            return Ok(ApiResponse.Ok("Password reset successful"));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(ApiResponse.Fail(ex.Message));
+        }
+    }
 }
