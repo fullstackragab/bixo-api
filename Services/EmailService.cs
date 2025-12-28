@@ -1500,4 +1500,134 @@ public class EmailService : IEmailService
             </body>
             </html>";
     }
+
+    // === Admin Scope Notification Emails ===
+
+    public async Task SendAdminScopeApprovedNotificationAsync(AdminScopeApprovedNotification notification)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_settings.ApiKey) || string.IsNullOrEmpty(_settings.AdminInboxEmail))
+            {
+                _logger.LogWarning("Email settings not configured, skipping admin scope approved notification");
+                return;
+            }
+
+            var fromEmail = !string.IsNullOrEmpty(_settings.ShortlistFromEmail)
+                ? _settings.ShortlistFromEmail
+                : _settings.FromEmail;
+            var from = new EmailAddress(fromEmail, _settings.FromName);
+            var to = new EmailAddress(_settings.AdminInboxEmail);
+            var subject = $"Scope approved: {notification.RoleTitle} at {notification.CompanyName}";
+            var htmlContent = BuildAdminScopeApprovedEmailBody(notification);
+
+            var msg = MailHelper.CreateSingleEmail(from, to, subject, null, htmlContent);
+
+            var response = await _client.SendEmailAsync(msg);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("Admin scope approved notification sent for shortlist {ShortlistId}", notification.ShortlistId);
+            }
+            else
+            {
+                var responseBody = await response.Body.ReadAsStringAsync();
+                _logger.LogError("SendGrid API returned {StatusCode}: {Body}", response.StatusCode, responseBody);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send admin scope approved notification for shortlist {ShortlistId}", notification.ShortlistId);
+        }
+    }
+
+    private static string BuildAdminScopeApprovedEmailBody(AdminScopeApprovedNotification notification)
+    {
+        return $@"
+            <html>
+            <body style=""font-family: Arial, sans-serif; line-height: 1.8; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;"">
+                <h1 style=""color: #059669; margin-bottom: 24px;"">Scope approved</h1>
+
+                <p><strong>{notification.CompanyName}</strong> has approved the scope and pricing for their <strong>{notification.RoleTitle}</strong> shortlist.</p>
+
+                <div style=""background-color: #f0fdf4; border: 1px solid #bbf7d0; padding: 20px; border-radius: 8px; margin: 24px 0;"">
+                    <p style=""margin: 0 0 8px 0;""><strong>Role:</strong> {notification.RoleTitle}</p>
+                    <p style=""margin: 0 0 8px 0;""><strong>Approved price:</strong> ${notification.ApprovedPrice:F2}</p>
+                    <p style=""margin: 0 0 8px 0;""><strong>Proposed candidates:</strong> {notification.ProposedCandidates}</p>
+                    <p style=""margin: 0;""><strong>Approved at:</strong> {notification.ApprovedAt:MMMM dd, yyyy} at {notification.ApprovedAt:HH:mm} UTC</p>
+                </div>
+
+                <p style=""color: #6b7280;"">The shortlist is now ready for delivery when candidates are finalized.</p>
+
+                <p style=""margin-top: 32px; color: #6b7280;"">— Bixo</p>
+            </body>
+            </html>";
+    }
+
+    public async Task SendAdminScopeDeclinedNotificationAsync(AdminScopeDeclinedNotification notification)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_settings.ApiKey) || string.IsNullOrEmpty(_settings.AdminInboxEmail))
+            {
+                _logger.LogWarning("Email settings not configured, skipping admin scope declined notification");
+                return;
+            }
+
+            var fromEmail = !string.IsNullOrEmpty(_settings.ShortlistFromEmail)
+                ? _settings.ShortlistFromEmail
+                : _settings.FromEmail;
+            var from = new EmailAddress(fromEmail, _settings.FromName);
+            var to = new EmailAddress(_settings.AdminInboxEmail);
+            var subject = $"Scope declined: {notification.RoleTitle} at {notification.CompanyName}";
+            var htmlContent = BuildAdminScopeDeclinedEmailBody(notification);
+
+            var msg = MailHelper.CreateSingleEmail(from, to, subject, null, htmlContent);
+
+            var response = await _client.SendEmailAsync(msg);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("Admin scope declined notification sent for shortlist {ShortlistId}", notification.ShortlistId);
+            }
+            else
+            {
+                var responseBody = await response.Body.ReadAsStringAsync();
+                _logger.LogError("SendGrid API returned {StatusCode}: {Body}", response.StatusCode, responseBody);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send admin scope declined notification for shortlist {ShortlistId}", notification.ShortlistId);
+        }
+    }
+
+    private static string BuildAdminScopeDeclinedEmailBody(AdminScopeDeclinedNotification notification)
+    {
+        var reasonSection = !string.IsNullOrEmpty(notification.DeclineReason)
+            ? $@"<div style=""background-color: #fef2f2; border: 1px solid #fecaca; padding: 20px; border-radius: 8px; margin: 24px 0;"">
+                    <p style=""margin: 0;""><strong>Reason:</strong> {notification.DeclineReason}</p>
+                </div>"
+            : "";
+
+        return $@"
+            <html>
+            <body style=""font-family: Arial, sans-serif; line-height: 1.8; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;"">
+                <h1 style=""color: #dc2626; margin-bottom: 24px;"">Scope declined</h1>
+
+                <p><strong>{notification.CompanyName}</strong> has declined the scope and pricing for their <strong>{notification.RoleTitle}</strong> shortlist.</p>
+
+                {reasonSection}
+
+                <div style=""background-color: #f9fafb; padding: 20px; border-radius: 8px; margin: 24px 0;"">
+                    <p style=""margin: 0 0 8px 0;""><strong>Role:</strong> {notification.RoleTitle}</p>
+                    <p style=""margin: 0;""><strong>Declined at:</strong> {notification.DeclinedAt:MMMM dd, yyyy} at {notification.DeclinedAt:HH:mm} UTC</p>
+                </div>
+
+                <p style=""color: #6b7280;"">The shortlist has been returned to Processing status. Please review and propose a new scope/price.</p>
+
+                <p style=""margin-top: 32px; color: #6b7280;"">— Bixo</p>
+            </body>
+            </html>";
+    }
 }

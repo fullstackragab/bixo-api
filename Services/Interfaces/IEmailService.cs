@@ -58,6 +58,14 @@ public interface IEmailService
 
     /// <summary>Sent to candidate when their public work summary request is fulfilled</summary>
     Task SendPublicWorkSummaryReadyEmailAsync(PublicWorkSummaryReadyNotification notification);
+
+    // === Admin Scope Notification Emails ===
+
+    /// <summary>Sent to admin when company approves scope/pricing</summary>
+    Task SendAdminScopeApprovedNotificationAsync(AdminScopeApprovedNotification notification);
+
+    /// <summary>Sent to admin when company declines scope/pricing</summary>
+    Task SendAdminScopeDeclinedNotificationAsync(AdminScopeDeclinedNotification notification);
 }
 
 public class SupportNotification
@@ -255,4 +263,25 @@ public class PublicWorkSummaryReadyNotification
     public string Email { get; set; } = string.Empty;
     public string? FirstName { get; set; }
     public string ProfileUrl { get; set; } = string.Empty;
+}
+
+/// <summary>Sent to admin when company approves scope/pricing</summary>
+public class AdminScopeApprovedNotification
+{
+    public Guid ShortlistId { get; set; }
+    public string CompanyName { get; set; } = string.Empty;
+    public string RoleTitle { get; set; } = string.Empty;
+    public decimal ApprovedPrice { get; set; }
+    public int ProposedCandidates { get; set; }
+    public DateTime ApprovedAt { get; set; }
+}
+
+/// <summary>Sent to admin when company declines scope/pricing</summary>
+public class AdminScopeDeclinedNotification
+{
+    public Guid ShortlistId { get; set; }
+    public string CompanyName { get; set; } = string.Empty;
+    public string RoleTitle { get; set; } = string.Empty;
+    public string? DeclineReason { get; set; }
+    public DateTime DeclinedAt { get; set; }
 }

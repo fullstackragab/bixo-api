@@ -1145,9 +1145,10 @@ Declining will not affect your visibility for future opportunities.";
         using var connection = _db.CreateConnection();
 
         var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
-            SELECT id, status, proposed_price
-            FROM shortlist_requests
-            WHERE id = @Id AND company_id = @CompanyId",
+            SELECT sr.id, sr.status, sr.proposed_price, sr.proposed_candidates, sr.role_title, c.company_name
+            FROM shortlist_requests sr
+            JOIN companies c ON c.id = sr.company_id
+            WHERE sr.id = @Id AND sr.company_id = @CompanyId",
             new { Id = shortlistRequestId, CompanyId = companyId });
 
         if (shortlist == null)
@@ -1165,6 +1166,8 @@ Declining will not affect your visibility for future opportunities.";
             throw new InvalidOperationException("Cannot approve pricing: no valid price has been set");
         }
 
+        var now = DateTime.UtcNow;
+
         await connection.ExecuteAsync(@"
             UPDATE shortlist_requests
             SET status = @Status, pricing_approved_at = @Now, price_amount = proposed_price
@@ -1172,12 +1175,23 @@ Declining will not affect your visibility for future opportunities.";
             new
             {
                 Status = (int)ShortlistStatus.Approved,
-                Now = DateTime.UtcNow,
+                Now = now,
                 Id = shortlistRequestId
             });
 
         // Send PricingApproved email to company (idempotent - only sends once)
         _ = TrySendEmailEventAsync(shortlistRequestId, ShortlistEmailEvent.PricingApproved);
+
+        // Send admin notification that company approved scope/pricing
+        _ = _emailService.SendAdminScopeApprovedNotificationAsync(new AdminScopeApprovedNotification
+        {
+            ShortlistId = shortlistRequestId,
+            CompanyName = shortlist.company_name as string ?? "",
+            RoleTitle = (string)shortlist.role_title,
+            ApprovedPrice = (decimal)shortlist.proposed_price,
+            ProposedCandidates = (int)(shortlist.proposed_candidates ?? 0),
+            ApprovedAt = now
+        });
     }
 
     /// <summary>
@@ -1188,9 +1202,10 @@ Declining will not affect your visibility for future opportunities.";
         using var connection = _db.CreateConnection();
 
         var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
-            SELECT id, status, proposed_price
-            FROM shortlist_requests
-            WHERE id = @Id AND company_id = @CompanyId",
+            SELECT sr.id, sr.status, sr.proposed_price, sr.role_title, c.company_name
+            FROM shortlist_requests sr
+            JOIN companies c ON c.id = sr.company_id
+            WHERE sr.id = @Id AND sr.company_id = @CompanyId",
             new { Id = shortlistRequestId, CompanyId = companyId });
 
         if (shortlist == null)
@@ -1202,6 +1217,8 @@ Declining will not affect your visibility for future opportunities.";
         {
             throw new InvalidOperationException($"Cannot decline pricing: shortlist is not in PricingPending status (current: {(ShortlistStatus)(int)shortlist.status})");
         }
+
+        var now = DateTime.UtcNow;
 
         await connection.ExecuteAsync(@"
             UPDATE shortlist_requests
@@ -1220,6 +1237,16 @@ Declining will not affect your visibility for future opportunities.";
 
         // Send PricingDeclined email to company (idempotent - only sends once)
         _ = TrySendEmailEventAsync(shortlistRequestId, ShortlistEmailEvent.PricingDeclined);
+
+        // Send admin notification that company declined scope/pricing
+        _ = _emailService.SendAdminScopeDeclinedNotificationAsync(new AdminScopeDeclinedNotification
+        {
+            ShortlistId = shortlistRequestId,
+            CompanyName = shortlist.company_name as string ?? "",
+            RoleTitle = (string)shortlist.role_title,
+            DeclineReason = reason,
+            DeclinedAt = now
+        });
     }
 
     /// <summary>
