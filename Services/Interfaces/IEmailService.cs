@@ -6,6 +6,7 @@ public interface IEmailService
     Task SendCompanyWelcomeEmailAsync(CompanyWelcomeNotification notification);
     Task SendCandidateWelcomeEmailAsync(CandidateWelcomeNotification notification);
     Task SendCandidateProfileActiveEmailAsync(CandidateProfileActiveNotification notification);
+    Task SendCandidateProfileRejectedEmailAsync(CandidateProfileRejectedNotification notification);
     Task SendAdminNewCandidateNotificationAsync(AdminNewCandidateNotification notification);
     Task SendAdminNewCompanyNotificationAsync(AdminNewCompanyNotification notification);
     Task SendAdminNewShortlistNotificationAsync(AdminNewShortlistNotification notification);
@@ -52,6 +53,11 @@ public interface IEmailService
 
     /// <summary>Sent to candidate when a recommendation is submitted</summary>
     Task SendRecommendationReceivedEmailAsync(RecommendationReceivedNotification notification);
+
+    // === Public Work Summary Emails ===
+
+    /// <summary>Sent to candidate when their public work summary request is fulfilled</summary>
+    Task SendPublicWorkSummaryReadyEmailAsync(PublicWorkSummaryReadyNotification notification);
 }
 
 public class SupportNotification
@@ -119,6 +125,13 @@ public class CandidateWelcomeNotification
 }
 
 public class CandidateProfileActiveNotification
+{
+    public string Email { get; set; } = string.Empty;
+    public string? FirstName { get; set; }
+    public string ProfileUrl { get; set; } = string.Empty;
+}
+
+public class CandidateProfileRejectedNotification
 {
     public string Email { get; set; } = string.Empty;
     public string? FirstName { get; set; }
@@ -234,4 +247,12 @@ public class ShortlistPricingDeclinedNotification
     public string Reason { get; set; } = string.Empty;
     public Guid ShortlistId { get; set; }
     public string ShortlistUrl { get; set; } = string.Empty;
+}
+
+/// <summary>Sent to candidate when their public work summary request is fulfilled</summary>
+public class PublicWorkSummaryReadyNotification
+{
+    public string Email { get; set; } = string.Empty;
+    public string? FirstName { get; set; }
+    public string ProfileUrl { get; set; } = string.Empty;
 }

@@ -9,6 +9,19 @@ public class UpdateCandidateRequest
     public string? LastName { get; set; }
     public string? LinkedInUrl { get; set; }
     public string? GitHubUrl { get; set; }
+
+    /// <summary>
+    /// Public work summary content (editable by candidate).
+    /// Based on public project documentation.
+    /// </summary>
+    public string? GitHubSummary { get; set; }
+
+    /// <summary>
+    /// Whether to include public work summary in profile visible to companies.
+    /// Opt-in only - candidates must explicitly enable.
+    /// </summary>
+    public bool? GitHubSummaryEnabled { get; set; }
+
     public string? DesiredRole { get; set; }
 
     // Legacy field (still supported for backwards compatibility)

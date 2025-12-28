@@ -12,6 +12,7 @@ public class EmailSettings
     public string WelcomeFromEmail { get; set; } = "welcome@bixo.io";
     public string RecommendationsFromEmail { get; set; } = "recommendations@bixo.io";
     public string ShortlistFromEmail { get; set; } = "shortlist@bixo.io";
+    public string PublicSummaryFromEmail { get; set; } = "hello@bixo.io";
     public string DataResidency { get; set; } = "eu"; // "eu" or "global"
 
     /// <summary>Frontend URL for generating deep links in emails</summary>

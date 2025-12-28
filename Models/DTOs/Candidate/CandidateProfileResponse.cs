@@ -13,6 +13,41 @@ public class CandidateProfileResponse
     public string? GitHubUrl { get; set; }
     public string? GitHubSummary { get; set; }
     public DateTime? GitHubSummaryGeneratedAt { get; set; }
+
+    /// <summary>
+    /// Whether the public work summary is visible to companies.
+    /// Candidate controls this - opt-in only.
+    /// </summary>
+    public bool GitHubSummaryEnabled { get; set; }
+
+    /// <summary>
+    /// When the candidate requested a public work summary (null if never requested)
+    /// </summary>
+    public DateTime? GitHubSummaryRequestedAt { get; set; }
+
+    /// <summary>
+    /// Status of the public work summary request:
+    /// - "not_requested": Has GitHub URL but hasn't requested summary
+    /// - "pending": Requested, waiting for Bixo to prepare
+    /// - "ready": Summary prepared, candidate can review and enable
+    /// - "enabled": Summary is visible to companies
+    /// - "unavailable": No GitHub URL provided
+    /// </summary>
+    public string GitHubSummaryStatus => DetermineGitHubSummaryStatus();
+
+    private string DetermineGitHubSummaryStatus()
+    {
+        if (string.IsNullOrEmpty(GitHubUrl))
+            return "unavailable";
+        if (GitHubSummaryEnabled && !string.IsNullOrEmpty(GitHubSummary))
+            return "enabled";
+        if (!string.IsNullOrEmpty(GitHubSummary))
+            return "ready";
+        if (GitHubSummaryRequestedAt.HasValue)
+            return "pending";
+        return "not_requested";
+    }
+
     public string? CvFileName { get; set; }
     public string? CvDownloadUrl { get; set; }
     public string? DesiredRole { get; set; }

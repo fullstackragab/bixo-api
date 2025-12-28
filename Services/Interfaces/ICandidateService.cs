@@ -14,6 +14,12 @@ public interface ICandidateService
     Task SetVisibilityAsync(Guid userId, bool visible);
 
     /// <summary>
+    /// Candidate requests a public work summary based on their GitHub profile.
+    /// Bixo will prepare it within 2-3 business days.
+    /// </summary>
+    Task<bool> RequestPublicWorkSummaryAsync(Guid userId);
+
+    /// <summary>
     /// Admin: Re-trigger CV parsing for a candidate. Used when initial parse failed.
     /// </summary>
     Task<CvReparseResult> ReparseCvAsync(Guid candidateId);

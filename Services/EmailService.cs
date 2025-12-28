@@ -200,7 +200,10 @@ public class EmailService : IEmailService
                 return;
             }
 
-            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
+            var fromEmail = !string.IsNullOrEmpty(_settings.ShortlistFromEmail)
+                ? _settings.ShortlistFromEmail
+                : _settings.FromEmail;
+            var from = new EmailAddress(fromEmail, _settings.FromName);
             var to = new EmailAddress(notification.Email);
             var subject = $"Your {notification.RoleTitle} shortlist is ready";
             var htmlContent = BuildShortlistPricingReadyEmailBody(notification);
@@ -267,7 +270,10 @@ public class EmailService : IEmailService
                 return;
             }
 
-            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
+            var fromEmail = !string.IsNullOrEmpty(_settings.ShortlistFromEmail)
+                ? _settings.ShortlistFromEmail
+                : _settings.FromEmail;
+            var from = new EmailAddress(fromEmail, _settings.FromName);
             var to = new EmailAddress(notification.Email);
             var subject = "Approval needed to continue your shortlist request";
             var htmlContent = BuildShortlistAuthorizationRequiredEmailBody(notification.ShortlistUrl);
@@ -323,7 +329,10 @@ public class EmailService : IEmailService
                 return;
             }
 
-            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
+            var fromEmail = !string.IsNullOrEmpty(_settings.ShortlistFromEmail)
+                ? _settings.ShortlistFromEmail
+                : _settings.FromEmail;
+            var from = new EmailAddress(fromEmail, _settings.FromName);
             var to = new EmailAddress(notification.Email);
             var subject = $"Your {notification.RoleTitle} candidates are ready";
             var htmlContent = BuildShortlistDeliveredEmailBody(notification);
@@ -524,6 +533,81 @@ public class EmailService : IEmailService
                 </p>
 
                 <p style=""margin-top: 32px;"">If you have questions, just reply to this email — we're happy to help.</p>
+
+                <p style=""margin-top: 32px;"">Best,<br />
+                <strong>The Bixo Team</strong><br />
+                <a href=""mailto:welcome@bixo.io"" style=""color: #6b7280;"">welcome@bixo.io</a></p>
+            </body>
+            </html>";
+    }
+
+    public async Task SendCandidateProfileRejectedEmailAsync(CandidateProfileRejectedNotification notification)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_settings.ApiKey))
+            {
+                _logger.LogWarning("Email settings not configured, skipping candidate profile rejected email");
+                return;
+            }
+
+            var fromEmail = !string.IsNullOrEmpty(_settings.WelcomeFromEmail)
+                ? _settings.WelcomeFromEmail
+                : _settings.FromEmail;
+            var from = new EmailAddress(fromEmail, _settings.FromName);
+            var to = new EmailAddress(notification.Email);
+            var subject = "Update on your Bixo profile";
+            var htmlContent = BuildCandidateProfileRejectedEmailBody(notification);
+
+            var msg = MailHelper.CreateSingleEmail(from, to, subject, null, htmlContent);
+            msg.SetReplyTo(new EmailAddress(fromEmail, _settings.FromName));
+
+            var response = await _client.SendEmailAsync(msg);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("Candidate profile rejected email sent to: {Email}", notification.Email);
+            }
+            else
+            {
+                var responseBody = await response.Body.ReadAsStringAsync();
+                _logger.LogError("SendGrid API returned {StatusCode}: {Body}", response.StatusCode, responseBody);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send candidate profile rejected email to: {Email}", notification.Email);
+        }
+    }
+
+    private static string BuildCandidateProfileRejectedEmailBody(CandidateProfileRejectedNotification notification)
+    {
+        var greeting = !string.IsNullOrEmpty(notification.FirstName)
+            ? $"Hi {notification.FirstName}"
+            : "Hi";
+
+        return $@"
+            <html>
+            <body style=""font-family: Arial, sans-serif; line-height: 1.8; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;"">
+                <p>{greeting},</p>
+
+                <p>Thank you for your interest in Bixo.</p>
+
+                <p>After reviewing your profile, we've decided not to activate it on our platform at this time.</p>
+
+                <p style=""margin-top: 24px;"">This could be due to:</p>
+
+                <ul style=""padding-left: 20px;"">
+                    <li>Incomplete or unclear profile information</li>
+                    <li>CV quality or formatting issues</li>
+                    <li>Experience level not matching our current demand</li>
+                </ul>
+
+                <p style=""margin-top: 24px;"">If you believe this was a mistake or would like to update your profile, please reply to this email and we'll be happy to review it again.</p>
+
+                <p style=""margin-top: 32px;"">
+                    <a href=""{notification.ProfileUrl}"" style=""background-color: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;"">Update your profile</a>
+                </p>
 
                 <p style=""margin-top: 32px;"">Best,<br />
                 <strong>The Bixo Team</strong><br />
@@ -755,7 +839,10 @@ public class EmailService : IEmailService
                 return;
             }
 
-            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
+            var fromEmail = !string.IsNullOrEmpty(_settings.ShortlistFromEmail)
+                ? _settings.ShortlistFromEmail
+                : _settings.FromEmail;
+            var from = new EmailAddress(fromEmail, _settings.FromName);
             var to = new EmailAddress(notification.Email);
             var subject = "Update on your shortlist request";
             var htmlContent = BuildShortlistNoMatchEmailBody(notification.ShortlistUrl);
@@ -813,7 +900,10 @@ public class EmailService : IEmailService
                 return;
             }
 
-            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
+            var fromEmail = !string.IsNullOrEmpty(_settings.ShortlistFromEmail)
+                ? _settings.ShortlistFromEmail
+                : _settings.FromEmail;
+            var from = new EmailAddress(fromEmail, _settings.FromName);
             var to = new EmailAddress(notification.Email);
             var subject = $"Suggestion for your {notification.RoleTitle} search";
             var htmlContent = BuildShortlistAdjustmentSuggestedEmailBody(notification);
@@ -876,7 +966,10 @@ public class EmailService : IEmailService
                 return;
             }
 
-            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
+            var fromEmail = !string.IsNullOrEmpty(_settings.ShortlistFromEmail)
+                ? _settings.ShortlistFromEmail
+                : _settings.FromEmail;
+            var from = new EmailAddress(fromEmail, _settings.FromName);
             var to = new EmailAddress(notification.Email);
             var subject = $"Update on your {notification.RoleTitle} search";
             var htmlContent = BuildShortlistSearchExtendedEmailBody(notification);
@@ -934,7 +1027,10 @@ public class EmailService : IEmailService
                 return;
             }
 
-            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
+            var fromEmail = !string.IsNullOrEmpty(_settings.ShortlistFromEmail)
+                ? _settings.ShortlistFromEmail
+                : _settings.FromEmail;
+            var from = new EmailAddress(fromEmail, _settings.FromName);
             var to = new EmailAddress(notification.Email);
             var subject = $"We're working on your {notification.RoleTitle} shortlist";
             var htmlContent = BuildShortlistProcessingStartedEmailBody(notification);
@@ -992,7 +1088,10 @@ public class EmailService : IEmailService
                 return;
             }
 
-            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
+            var fromEmail = !string.IsNullOrEmpty(_settings.ShortlistFromEmail)
+                ? _settings.ShortlistFromEmail
+                : _settings.FromEmail;
+            var from = new EmailAddress(fromEmail, _settings.FromName);
             var to = new EmailAddress(notification.Email);
             var subject = $"Your {notification.RoleTitle} shortlist is confirmed";
             var htmlContent = BuildShortlistPricingApprovedEmailBody(notification);
@@ -1050,7 +1149,10 @@ public class EmailService : IEmailService
                 return;
             }
 
-            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
+            var fromEmail = !string.IsNullOrEmpty(_settings.ShortlistFromEmail)
+                ? _settings.ShortlistFromEmail
+                : _settings.FromEmail;
+            var from = new EmailAddress(fromEmail, _settings.FromName);
             var to = new EmailAddress(notification.Email);
             var subject = $"Your {notification.RoleTitle} shortlist is complete";
             var htmlContent = BuildShortlistCompletedEmailBody(notification);
@@ -1110,7 +1212,10 @@ public class EmailService : IEmailService
                 return;
             }
 
-            var from = new EmailAddress(_settings.FromEmail, _settings.FromName);
+            var fromEmail = !string.IsNullOrEmpty(_settings.ShortlistFromEmail)
+                ? _settings.ShortlistFromEmail
+                : _settings.FromEmail;
+            var from = new EmailAddress(fromEmail, _settings.FromName);
             var to = new EmailAddress(notification.Email);
             var subject = $"Update on your {notification.RoleTitle} request";
             var htmlContent = BuildShortlistPricingDeclinedEmailBody(notification);
@@ -1318,6 +1423,80 @@ public class EmailService : IEmailService
                 <p>Review and approve it from your profile to make it visible to companies.</p>
 
                 <p style=""margin-top: 32px; color: #6b7280;"">— Bixo</p>
+            </body>
+            </html>";
+    }
+
+    public async Task SendPublicWorkSummaryReadyEmailAsync(PublicWorkSummaryReadyNotification notification)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_settings.ApiKey))
+            {
+                _logger.LogWarning("Email settings not configured, skipping public work summary ready email");
+                return;
+            }
+
+            var fromEmail = !string.IsNullOrEmpty(_settings.PublicSummaryFromEmail)
+                ? _settings.PublicSummaryFromEmail
+                : _settings.FromEmail;
+            var from = new EmailAddress(fromEmail, _settings.FromName);
+            var to = new EmailAddress(notification.Email);
+            var subject = "Your public work summary is ready";
+            var htmlContent = BuildPublicWorkSummaryReadyEmailBody(notification);
+
+            var msg = MailHelper.CreateSingleEmail(from, to, subject, null, htmlContent);
+            msg.SetReplyTo(new EmailAddress(fromEmail, _settings.FromName));
+
+            var response = await _client.SendEmailAsync(msg);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("Public work summary ready email sent to: {Email}", notification.Email);
+            }
+            else
+            {
+                var responseBody = await response.Body.ReadAsStringAsync();
+                _logger.LogError("SendGrid API returned {StatusCode}: {Body}", response.StatusCode, responseBody);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send public work summary ready email to: {Email}", notification.Email);
+        }
+    }
+
+    private static string BuildPublicWorkSummaryReadyEmailBody(PublicWorkSummaryReadyNotification notification)
+    {
+        var greeting = !string.IsNullOrEmpty(notification.FirstName)
+            ? $"Hi {notification.FirstName}"
+            : "Hi";
+
+        return $@"
+            <html>
+            <body style=""font-family: Arial, sans-serif; line-height: 1.8; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;"">
+                <p>{greeting},</p>
+
+                <p>Good news — your <strong>public work summary</strong> is ready for review.</p>
+
+                <p>This summary is based on publicly available project documentation and is intended as optional supporting context for your profile.</p>
+
+                <p style=""margin-top: 24px;"">What you can do now:</p>
+
+                <ul style=""padding-left: 20px;"">
+                    <li>Review and edit the summary if needed</li>
+                    <li>Choose whether to include it in your profile</li>
+                    <li>Enable it to make it visible to companies</li>
+                </ul>
+
+                <p style=""margin-top: 32px;"">
+                    <a href=""{notification.ProfileUrl}"" style=""background-color: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;"">Review your summary</a>
+                </p>
+
+                <p style=""margin-top: 32px;"">If you have any questions, just reply to this email.</p>
+
+                <p style=""margin-top: 32px;"">Best,<br />
+                <strong>The Bixo Team</strong></p>
             </body>
             </html>";
     }

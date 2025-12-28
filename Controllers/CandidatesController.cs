@@ -159,6 +159,22 @@ public class CandidatesController : ControllerBase
     }
 
     /// <summary>
+    /// Request a public work summary based on GitHub profile.
+    /// Bixo will prepare a curated summary within 2-3 business days.
+    /// </summary>
+    [HttpPost("public-work-summary/request")]
+    public async Task<ActionResult<ApiResponse>> RequestPublicWorkSummary()
+    {
+        var success = await _candidateService.RequestPublicWorkSummaryAsync(GetUserId());
+        if (!success)
+        {
+            return BadRequest(ApiResponse.Fail("Unable to request summary. Please ensure you have a GitHub URL in your profile."));
+        }
+
+        return Ok(ApiResponse.Ok("Request received. We'll prepare your public work summary within 2-3 business days."));
+    }
+
+    /// <summary>
     /// Update the candidate's GitHub summary. Only available if admin has generated one.
     /// </summary>
     [HttpPut("github-summary")]

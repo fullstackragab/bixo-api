@@ -368,7 +368,8 @@ public class CompanyService : ICompanyService
         var candidate = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
             SELECT c.id, c.user_id, c.first_name, c.last_name, c.linkedin_url, c.cv_file_key,
                    c.desired_role, c.location_preference, c.remote_preference, c.availability,
-                   c.seniority_estimate, u.last_active_at, u.email
+                   c.seniority_estimate, c.github_url, c.github_summary, c.github_summary_enabled,
+                   u.last_active_at, u.email
             FROM candidates c
             JOIN users u ON u.id = c.user_id
             WHERE c.id = @CandidateId AND c.profile_visible = TRUE",
@@ -376,14 +377,16 @@ public class CompanyService : ICompanyService
 
         if (candidate == null) return null;
 
-        // Check if candidate is in any of this company's shortlists
+        // Check if candidate is in any of this company's approved/delivered shortlists
         var isInShortlist = await connection.ExecuteScalarAsync<bool>(@"
             SELECT EXISTS(
                 SELECT 1 FROM shortlist_candidates sc
                 JOIN shortlist_requests sr ON sr.id = sc.shortlist_request_id
-                WHERE sc.candidate_id = @CandidateId AND sr.company_id = @CompanyId
+                WHERE sc.candidate_id = @CandidateId
+                  AND sr.company_id = @CompanyId
+                  AND sr.status IN (@Approved, @Delivered)
             )",
-            new { CandidateId = candidateId, CompanyId = companyId });
+            new { CandidateId = candidateId, CompanyId = companyId, Approved = (int)ShortlistStatus.Approved, Delivered = (int)ShortlistStatus.Delivered });
 
         // Record profile view
         var existingView = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
@@ -458,11 +461,13 @@ public class CompanyService : ICompanyService
             RecommendationsCount = recommendationsCount,
             LastActiveAt = (DateTime)candidate.last_active_at,
             IsSaved = isSaved,
-            // Shortlist-only fields - only populated if candidate is in company's shortlist
+            // Shortlist-only fields - only populated if candidate is in company's approved/delivered shortlist
             IsInShortlist = isInShortlist,
             Email = isInShortlist ? (string?)candidate.email : null,
             LinkedInUrl = isInShortlist ? (string?)candidate.linkedin_url : null,
-            CvDownloadUrl = cvDownloadUrl
+            CvDownloadUrl = cvDownloadUrl,
+            GitHubUrl = isInShortlist ? (string?)candidate.github_url : null,
+            GitHubSummary = isInShortlist && (bool?)candidate.github_summary_enabled == true ? (string?)candidate.github_summary : null
         };
     }
 

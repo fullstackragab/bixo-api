@@ -358,7 +358,7 @@ public class ShortlistService : IShortlistService
                    sc.is_new, sc.previously_recommended_in, sc.re_inclusion_reason,
                    sc.interest_status, sc.interest_responded_at,
                    c.first_name, c.last_name, c.desired_role, c.seniority_estimate, c.availability, c.remote_preference,
-                   c.github_summary,
+                   c.github_summary, c.github_summary_enabled,
                    cl.country as location_country
             FROM shortlist_candidates sc
             JOIN candidates c ON c.id = sc.candidate_id
@@ -409,7 +409,7 @@ public class ShortlistService : IShortlistService
                     Region = c.location_country as string,
                     WhyThisCandidate = (string)c.match_reason,
                     Rank = (int)c.rank,
-                    HasPublicWorkSummary = !string.IsNullOrEmpty(c.github_summary as string)
+                    HasPublicWorkSummary = (c.github_summary_enabled as bool? ?? false) && !string.IsNullOrEmpty(c.github_summary as string)
                 });
             }
         }
@@ -445,7 +445,7 @@ public class ShortlistService : IShortlistService
                 MatchReason = (string)c.match_reason,
                 Rank = (int)c.rank,
                 Availability = (Availability)c.availability,
-                GitHubSummary = c.github_summary as string,
+                GitHubSummary = (c.github_summary_enabled as bool? ?? false) ? c.github_summary as string : null,
                 IsNew = isNew,
                 PreviouslyRecommendedIn = c.previously_recommended_in as Guid?,
                 ReInclusionReason = c.re_inclusion_reason as string,

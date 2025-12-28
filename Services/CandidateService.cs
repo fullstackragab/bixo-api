@@ -49,7 +49,9 @@ public class CandidateService : ICandidateService
         using var connection = _db.CreateConnection();
 
         var candidate = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
-            SELECT c.id, c.first_name, c.last_name, c.linkedin_url, c.github_url, c.github_summary, c.github_summary_generated_at,
+            SELECT c.id, c.first_name, c.last_name, c.linkedin_url, c.github_url,
+                   c.github_summary, c.github_summary_generated_at, c.github_summary_enabled,
+                   c.github_summary_requested_at,
                    c.cv_file_key, c.cv_original_file_name,
                    c.desired_role, c.location_preference, c.remote_preference, c.availability,
                    c.open_to_opportunities, c.profile_visible, c.profile_approved_at, c.seniority_estimate, c.created_at,
@@ -115,6 +117,8 @@ public class CandidateService : ICandidateService
             GitHubUrl = candidate.github_url as string,
             GitHubSummary = candidate.github_summary as string,
             GitHubSummaryGeneratedAt = candidate.github_summary_generated_at as DateTime?,
+            GitHubSummaryEnabled = candidate.github_summary_enabled as bool? ?? false,
+            GitHubSummaryRequestedAt = candidate.github_summary_requested_at as DateTime?,
             CvFileName = candidate.cv_original_file_name as string,
             CvDownloadUrl = cvDownloadUrl,
             DesiredRole = candidate.desired_role as string,
@@ -245,6 +249,8 @@ public class CandidateService : ICandidateService
                 last_name = COALESCE(@LastName, last_name),
                 linkedin_url = COALESCE(@LinkedInUrl, linkedin_url),
                 github_url = COALESCE(@GitHubUrl, github_url),
+                github_summary = COALESCE(@GitHubSummary, github_summary),
+                github_summary_enabled = COALESCE(@GitHubSummaryEnabled, github_summary_enabled),
                 desired_role = COALESCE(@DesiredRole, desired_role),
                 location_preference = COALESCE(@LocationPreference, location_preference),
                 remote_preference = COALESCE(@RemotePreference, remote_preference),
@@ -261,6 +267,8 @@ public class CandidateService : ICandidateService
                 request.LastName,
                 request.LinkedInUrl,
                 request.GitHubUrl,
+                request.GitHubSummary,
+                request.GitHubSummaryEnabled,
                 request.DesiredRole,
                 request.LocationPreference,
                 RemotePreference = request.RemotePreference.HasValue ? (int?)request.RemotePreference.Value : null,
@@ -633,6 +641,56 @@ public class CandidateService : ICandidateService
         await connection.ExecuteAsync(@"
             UPDATE candidates SET profile_visible = @Visible, updated_at = @Now WHERE user_id = @UserId",
             new { UserId = userId, Visible = visible, Now = DateTime.UtcNow });
+    }
+
+    public async Task<bool> RequestPublicWorkSummaryAsync(Guid userId)
+    {
+        using var connection = _db.CreateConnection();
+
+        // Check if candidate has GitHub URL and hasn't already requested
+        var candidate = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT id, github_url, github_summary_requested_at, github_summary
+            FROM candidates
+            WHERE user_id = @UserId",
+            new { UserId = userId });
+
+        if (candidate == null)
+        {
+            _logger.LogWarning("Candidate not found for user {UserId}", userId);
+            return false;
+        }
+
+        // Must have GitHub URL to request summary
+        if (string.IsNullOrEmpty(candidate.github_url as string))
+        {
+            _logger.LogWarning("Cannot request public work summary without GitHub URL for user {UserId}", userId);
+            return false;
+        }
+
+        // Already has a summary - no need to request
+        if (!string.IsNullOrEmpty(candidate.github_summary as string))
+        {
+            _logger.LogInformation("Public work summary already exists for user {UserId}", userId);
+            return true;
+        }
+
+        // Already requested - idempotent, return success
+        if (candidate.github_summary_requested_at != null)
+        {
+            _logger.LogInformation("Public work summary already requested for user {UserId}", userId);
+            return true;
+        }
+
+        // Record the request
+        await connection.ExecuteAsync(@"
+            UPDATE candidates SET
+                github_summary_requested_at = @Now,
+                updated_at = @Now
+            WHERE user_id = @UserId",
+            new { UserId = userId, Now = DateTime.UtcNow });
+
+        _logger.LogInformation("Public work summary requested for user {UserId}", userId);
+        return true;
     }
 
     public async Task<CvReparseResult> ReparseCvAsync(Guid candidateId)

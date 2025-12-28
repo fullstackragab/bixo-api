@@ -27,6 +27,7 @@ public class AdminController : ControllerBase
     private readonly INotificationService _notificationService;
     private readonly IGitHubEnrichmentService _gitHubEnrichmentService;
     private readonly EmailSettings _emailSettings;
+    private readonly ILogger<AdminController> _logger;
 
     public AdminController(
         IDbConnectionFactory db,
@@ -38,7 +39,8 @@ public class AdminController : ControllerBase
         IEmailService emailService,
         INotificationService notificationService,
         IGitHubEnrichmentService gitHubEnrichmentService,
-        IOptions<EmailSettings> emailSettings)
+        IOptions<EmailSettings> emailSettings,
+        ILogger<AdminController> logger)
     {
         _db = db;
         _shortlistService = shortlistService;
@@ -50,6 +52,7 @@ public class AdminController : ControllerBase
         _notificationService = notificationService;
         _gitHubEnrichmentService = gitHubEnrichmentService;
         _emailSettings = emailSettings.Value;
+        _logger = logger;
     }
 
     [HttpGet("dashboard")]
@@ -65,7 +68,8 @@ public class AdminController : ControllerBase
             PendingShortlists = await connection.ExecuteScalarAsync<int>($"SELECT COUNT(*) FROM shortlist_requests WHERE status IN ({(int)ShortlistStatus.Submitted}, {(int)ShortlistStatus.Processing}, {(int)ShortlistStatus.PricingPending}, {(int)ShortlistStatus.Approved})"),
             CompletedShortlists = await connection.ExecuteScalarAsync<int>($"SELECT COUNT(*) FROM shortlist_requests WHERE status = {(int)ShortlistStatus.Delivered}"),
             TotalRevenue = await connection.ExecuteScalarAsync<decimal?>($"SELECT COALESCE(SUM(amount_captured), 0) FROM payments WHERE status = {(int)PaymentStatus.Captured}") ?? 0,
-            RecentSignups = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM users WHERE created_at >= @Cutoff", new { Cutoff = DateTime.UtcNow.AddDays(-7) })
+            RecentSignups = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM users WHERE created_at >= @Cutoff", new { Cutoff = DateTime.UtcNow.AddDays(-7) }),
+            PendingSummaryRequests = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM candidates WHERE github_summary_requested_at IS NOT NULL AND github_summary IS NULL")
         };
 
         return Ok(ApiResponse<AdminDashboardResponse>.Ok(dashboard));
@@ -76,18 +80,33 @@ public class AdminController : ControllerBase
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 20,
         [FromQuery] string? search = null,
-        [FromQuery] bool? visible = null)
+        [FromQuery] bool? visible = null,
+        [FromQuery] string? summaryStatus = null)
     {
         using var connection = _db.CreateConnection();
 
         var whereClause = "WHERE 1=1";
         if (!string.IsNullOrWhiteSpace(search))
         {
-            whereClause += " AND (c.first_name LIKE @Search OR c.last_name LIKE @Search OR u.email LIKE @Search)";
+            whereClause += " AND (c.first_name ILIKE @Search OR c.last_name ILIKE @Search OR u.email ILIKE @Search)";
         }
         if (visible.HasValue)
         {
             whereClause += " AND c.profile_visible = @Visible";
+        }
+
+        // Filter by GitHub summary status
+        if (!string.IsNullOrWhiteSpace(summaryStatus))
+        {
+            whereClause += summaryStatus.ToLower() switch
+            {
+                "pending" => " AND c.github_summary_requested_at IS NOT NULL AND c.github_summary IS NULL",
+                "ready" => " AND c.github_summary IS NOT NULL AND c.github_summary_enabled = FALSE",
+                "enabled" => " AND c.github_summary IS NOT NULL AND c.github_summary_enabled = TRUE",
+                "not_requested" => " AND c.github_url IS NOT NULL AND c.github_summary_requested_at IS NULL AND c.github_summary IS NULL",
+                "unavailable" => " AND c.github_url IS NULL",
+                _ => ""
+            };
         }
 
         var countSql = $@"
@@ -99,16 +118,22 @@ public class AdminController : ControllerBase
         var totalCount = await connection.ExecuteScalarAsync<int>(countSql,
             new { Search = $"%{search}%", Visible = visible });
 
+        // Order by requested_at for pending summaries (oldest first), otherwise by created_at
+        var orderBy = summaryStatus?.ToLower() == "pending"
+            ? "ORDER BY c.github_summary_requested_at ASC"
+            : "ORDER BY c.created_at DESC";
+
         var sql = $@"
             SELECT c.id, c.user_id, u.email, c.first_name, c.last_name, c.desired_role,
                    c.availability, c.seniority_estimate, c.profile_visible, c.created_at, u.last_active_at,
                    c.cv_file_key, c.cv_original_file_name, c.cv_parse_status, c.cv_parse_error,
+                   c.github_url, c.github_summary, c.github_summary_requested_at, c.github_summary_enabled,
                    (SELECT COUNT(*) FROM candidate_skills WHERE candidate_id = c.id) as skills_count,
                    (SELECT COUNT(*) FROM candidate_profile_views WHERE candidate_id = c.id) as profile_views_count
             FROM candidates c
             JOIN users u ON u.id = c.user_id
             {whereClause}
-            ORDER BY c.created_at DESC
+            {orderBy}
             OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY";
 
         var candidates = await connection.QueryAsync<dynamic>(sql,
@@ -132,7 +157,11 @@ public class AdminController : ControllerBase
             SkillsCount = (int)(c.skills_count ?? 0),
             ProfileViewsCount = (int)(c.profile_views_count ?? 0),
             CreatedAt = (DateTime)c.created_at,
-            LastActiveAt = (DateTime)c.last_active_at
+            LastActiveAt = (DateTime)c.last_active_at,
+            GitHubUrl = c.github_url as string,
+            GitHubSummary = c.github_summary as string,
+            GitHubSummaryRequestedAt = c.github_summary_requested_at as DateTime?,
+            GitHubSummaryEnabled = c.github_summary_enabled as bool? ?? false
         }).ToList();
 
         var result = new AdminCandidatePagedResponse
@@ -154,7 +183,8 @@ public class AdminController : ControllerBase
 
         var candidate = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
             SELECT c.id, c.user_id, u.email, c.first_name, c.last_name, c.linkedin_url, c.github_url,
-                   c.github_summary, c.github_summary_generated_at,
+                   c.github_summary, c.github_summary_generated_at, c.github_summary_requested_at,
+                   c.github_summary_enabled,
                    c.desired_role, c.location_preference, c.remote_preference,
                    c.availability, c.seniority_estimate, c.profile_visible, c.open_to_opportunities,
                    c.cv_file_key, c.cv_original_file_name,
@@ -200,6 +230,8 @@ public class AdminController : ControllerBase
             GitHubUrl = candidate.github_url as string,
             GitHubSummary = candidate.github_summary as string,
             GitHubSummaryGeneratedAt = candidate.github_summary_generated_at as DateTime?,
+            GitHubSummaryRequestedAt = candidate.github_summary_requested_at as DateTime?,
+            GitHubSummaryEnabled = candidate.github_summary_enabled as bool? ?? false,
             DesiredRole = candidate.desired_role as string,
             LocationPreference = candidate.location_preference as string,
             RemotePreference = candidate.remote_preference != null ? (RemotePreference?)(int)candidate.remote_preference : null,
@@ -368,7 +400,20 @@ public class AdminController : ControllerBase
     {
         using var connection = _db.CreateConnection();
 
-        var rowsAffected = await connection.ExecuteAsync(@"
+        // Fetch candidate data for email notification
+        var candidate = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT c.first_name, c.user_id, u.email
+            FROM candidates c
+            JOIN users u ON u.id = c.user_id
+            WHERE c.id = @Id",
+            new { Id = id });
+
+        if (candidate == null)
+        {
+            return NotFound(ApiResponse.Fail("Candidate not found"));
+        }
+
+        await connection.ExecuteAsync(@"
             UPDATE candidates SET
                 profile_visible = FALSE,
                 profile_approved_at = NULL,
@@ -377,10 +422,21 @@ public class AdminController : ControllerBase
             WHERE id = @Id",
             new { Now = DateTime.UtcNow, Id = id });
 
-        if (rowsAffected == 0)
+        // Send in-app notification
+        await _notificationService.CreateNotificationAsync(
+            (Guid)candidate.user_id,
+            "profile_rejected",
+            "Update on your profile",
+            "After reviewing your profile, we've decided not to activate it at this time. Please check your email for more details."
+        );
+
+        // Send rejection email (fire and forget)
+        _ = _emailService.SendCandidateProfileRejectedEmailAsync(new CandidateProfileRejectedNotification
         {
-            return NotFound(ApiResponse.Fail("Candidate not found"));
-        }
+            Email = (string)candidate.email,
+            FirstName = candidate.first_name as string,
+            ProfileUrl = $"{_emailSettings.FrontendUrl}/candidate/profile"
+        });
 
         return Ok(ApiResponse.Ok("Candidate rejected and hidden from matching"));
     }
@@ -432,6 +488,36 @@ public class AdminController : ControllerBase
     }
 
     /// <summary>
+    /// Get candidates who have requested a public work summary but haven't received one yet.
+    /// </summary>
+    [HttpGet("public-work-summary/pending")]
+    public async Task<ActionResult<ApiResponse<List<PendingSummaryRequest>>>> GetPendingSummaryRequests()
+    {
+        using var connection = _db.CreateConnection();
+
+        var pending = await connection.QueryAsync<dynamic>(@"
+            SELECT c.id, c.first_name, c.last_name, c.github_url, c.github_summary_requested_at,
+                   u.email
+            FROM candidates c
+            JOIN users u ON u.id = c.user_id
+            WHERE c.github_summary_requested_at IS NOT NULL
+              AND c.github_summary IS NULL
+            ORDER BY c.github_summary_requested_at ASC");
+
+        var result = pending.Select(p => new PendingSummaryRequest
+        {
+            CandidateId = (Guid)p.id,
+            FirstName = p.first_name as string,
+            LastName = p.last_name as string,
+            Email = (string)p.email,
+            GitHubUrl = (string)p.github_url,
+            RequestedAt = (DateTime)p.github_summary_requested_at
+        }).ToList();
+
+        return Ok(ApiResponse<List<PendingSummaryRequest>>.Ok(result));
+    }
+
+    /// <summary>
     /// Generate GitHub summary for a candidate by reading their GitHub profile README files.
     /// Saves the summary to the database and returns it.
     /// </summary>
@@ -440,8 +526,11 @@ public class AdminController : ControllerBase
     {
         using var connection = _db.CreateConnection();
 
-        var candidate = await connection.QueryFirstOrDefaultAsync<dynamic>(
-            "SELECT id, github_url, github_summary FROM candidates WHERE id = @Id",
+        var candidate = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT c.id, c.github_url, c.github_summary, c.first_name, c.user_id, u.email
+            FROM candidates c
+            JOIN users u ON u.id = c.user_id
+            WHERE c.id = @Id",
             new { Id = id });
 
         if (candidate == null)
@@ -474,6 +563,31 @@ public class AdminController : ControllerBase
                 GeneratedAt = DateTime.UtcNow,
                 Id = id
             });
+
+        // Notify candidate (email + in-app)
+        try
+        {
+            var profileUrl = $"{_emailSettings.FrontendUrl}/candidate/profile";
+
+            // Email notification
+            await _emailService.SendPublicWorkSummaryReadyEmailAsync(new PublicWorkSummaryReadyNotification
+            {
+                Email = (string)candidate.email,
+                FirstName = candidate.first_name as string,
+                ProfileUrl = profileUrl
+            });
+
+            // In-app notification
+            await _notificationService.CreateNotificationAsync(
+                (Guid)candidate.user_id,
+                "public_work_summary_ready",
+                "Your public work summary is ready for review");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send public work summary ready notification for candidate {CandidateId}", id);
+            // Don't fail the request if notification fails
+        }
 
         return Ok(ApiResponse<GitHubSummaryResponse>.Ok(new GitHubSummaryResponse
         {
@@ -1330,6 +1444,7 @@ public class AdminDashboardResponse
     public int CompletedShortlists { get; set; }
     public decimal TotalRevenue { get; set; }
     public int RecentSignups { get; set; }
+    public int PendingSummaryRequests { get; set; }
 }
 
 public class AdminCandidateResponse
@@ -1351,6 +1466,30 @@ public class AdminCandidateResponse
     public int ProfileViewsCount { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime LastActiveAt { get; set; }
+
+    // GitHub summary fields
+    public string? GitHubUrl { get; set; }
+    public string? GitHubSummary { get; set; }
+    public DateTime? GitHubSummaryRequestedAt { get; set; }
+    public bool GitHubSummaryEnabled { get; set; }
+
+    /// <summary>
+    /// Computed status: unavailable, not_requested, pending, ready, enabled
+    /// </summary>
+    public string GitHubSummaryStatus => DetermineGitHubSummaryStatus();
+
+    private string DetermineGitHubSummaryStatus()
+    {
+        if (string.IsNullOrEmpty(GitHubUrl))
+            return "unavailable";
+        if (GitHubSummaryEnabled && !string.IsNullOrEmpty(GitHubSummary))
+            return "enabled";
+        if (!string.IsNullOrEmpty(GitHubSummary))
+            return "ready";
+        if (GitHubSummaryRequestedAt.HasValue)
+            return "pending";
+        return "not_requested";
+    }
 }
 
 public class AdminCandidatePagedResponse
@@ -1373,6 +1512,27 @@ public class AdminCandidateDetailResponse
     public string? GitHubUrl { get; set; }
     public string? GitHubSummary { get; set; }
     public DateTime? GitHubSummaryGeneratedAt { get; set; }
+    public DateTime? GitHubSummaryRequestedAt { get; set; }
+    public bool GitHubSummaryEnabled { get; set; }
+
+    /// <summary>
+    /// Computed status: unavailable, not_requested, pending, ready, enabled
+    /// </summary>
+    public string GitHubSummaryStatus => DetermineGitHubSummaryStatus();
+
+    private string DetermineGitHubSummaryStatus()
+    {
+        if (string.IsNullOrEmpty(GitHubUrl))
+            return "unavailable";
+        if (GitHubSummaryEnabled && !string.IsNullOrEmpty(GitHubSummary))
+            return "enabled";
+        if (!string.IsNullOrEmpty(GitHubSummary))
+            return "ready";
+        if (GitHubSummaryRequestedAt.HasValue)
+            return "pending";
+        return "not_requested";
+    }
+
     public string? DesiredRole { get; set; }
     public string? LocationPreference { get; set; }
     public RemotePreference? RemotePreference { get; set; }
@@ -1720,6 +1880,16 @@ public class AdminCvReparseResponse
     public string Status { get; set; } = string.Empty;
     public string? Error { get; set; }
     public int SkillsExtracted { get; set; }
+}
+
+public class PendingSummaryRequest
+{
+    public Guid CandidateId { get; set; }
+    public string? FirstName { get; set; }
+    public string? LastName { get; set; }
+    public string Email { get; set; } = string.Empty;
+    public string GitHubUrl { get; set; } = string.Empty;
+    public DateTime RequestedAt { get; set; }
 }
 
 public class GitHubSummaryResponse

@@ -34,4 +34,6 @@ public class CandidateDetailResponse
     public string? Email { get; set; }
     public string? LinkedInUrl { get; set; }
     public string? CvDownloadUrl { get; set; }
+    public string? GitHubUrl { get; set; }
+    public string? GitHubSummary { get; set; }
 }
