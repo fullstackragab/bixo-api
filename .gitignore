@@ -39,3 +39,5 @@ appsettings.*.local.json
 
 # Secrets
 secrets.json
+secrets.local.json
+appsettings.Development.json
