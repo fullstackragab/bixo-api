@@ -71,6 +71,11 @@ public interface IEmailService
 
     /// <summary>Sent when user requests a password reset</summary>
     Task SendPasswordResetEmailAsync(PasswordResetNotification notification);
+
+    // === Admin Invite Emails ===
+
+    /// <summary>Sends a custom invite email from admin to a recipient</summary>
+    Task SendInviteEmailAsync(InviteEmailNotification notification);
 }
 
 public class SupportNotification
@@ -297,4 +302,12 @@ public class PasswordResetNotification
     public string Email { get; set; } = string.Empty;
     public string? FirstName { get; set; }
     public string ResetUrl { get; set; } = string.Empty;
+}
+
+/// <summary>Custom invite email sent by admin</summary>
+public class InviteEmailNotification
+{
+    public string SendTo { get; set; } = string.Empty;
+    public string Subject { get; set; } = string.Empty;
+    public string Body { get; set; } = string.Empty;
 }

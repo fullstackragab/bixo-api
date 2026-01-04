@@ -1704,4 +1704,35 @@ public class EmailService : IEmailService
             </body>
             </html>";
     }
+
+    // === Admin Invite Emails ===
+
+    public async Task SendInviteEmailAsync(InviteEmailNotification notification)
+    {
+        if (string.IsNullOrEmpty(_settings.ApiKey))
+        {
+            _logger.LogWarning("Email settings not configured, skipping invite email to {Email}", notification.SendTo);
+            throw new InvalidOperationException("Email service is not configured");
+        }
+
+        // Hardcode from address to hello@bixo.io for security
+        var from = new EmailAddress("hello@bixo.io", _settings.FromName);
+        var to = new EmailAddress(notification.SendTo);
+
+        var msg = MailHelper.CreateSingleEmail(from, to, notification.Subject, null, notification.Body);
+        msg.SetReplyTo(new EmailAddress("hello@bixo.io", _settings.FromName));
+
+        var response = await _client.SendEmailAsync(msg);
+
+        if (response.IsSuccessStatusCode)
+        {
+            _logger.LogInformation("Invite email sent to: {Email}", notification.SendTo);
+        }
+        else
+        {
+            var responseBody = await response.Body.ReadAsStringAsync();
+            _logger.LogError("SendGrid API returned {StatusCode}: {Body}", response.StatusCode, responseBody);
+            throw new InvalidOperationException($"Failed to send email: {response.StatusCode}");
+        }
+    }
 }

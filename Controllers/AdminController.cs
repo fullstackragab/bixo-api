@@ -1665,6 +1665,79 @@ public class AdminController : ControllerBase
 
         return Ok(ApiResponse.Ok("Recommendation rejected."));
     }
+
+    // === Invite Email Endpoints ===
+
+    /// <summary>
+    /// Send a custom invite email to an engineer.
+    /// The email is sent from hello@bixo.io (hardcoded for security).
+    /// </summary>
+    [HttpPost("send-invite")]
+    public async Task<ActionResult<ApiResponse>> SendInviteEmail([FromBody] SendInviteEmailRequest request)
+    {
+        // Validate request
+        if (string.IsNullOrWhiteSpace(request.SendTo))
+        {
+            return BadRequest(ApiResponse.Fail("Recipient email is required"));
+        }
+
+        if (!IsValidEmail(request.SendTo))
+        {
+            return BadRequest(ApiResponse.Fail("Invalid recipient email address"));
+        }
+
+        if (string.IsNullOrWhiteSpace(request.Subject))
+        {
+            return BadRequest(ApiResponse.Fail("Subject is required"));
+        }
+
+        if (string.IsNullOrWhiteSpace(request.Body))
+        {
+            return BadRequest(ApiResponse.Fail("Message body is required"));
+        }
+
+        var adminUserId = GetAdminUserId();
+
+        try
+        {
+            await _emailService.SendInviteEmailAsync(new InviteEmailNotification
+            {
+                SendTo = request.SendTo.Trim(),
+                Subject = request.Subject.Trim(),
+                Body = request.Body
+            });
+
+            _logger.LogInformation(
+                "Invite email sent by admin {AdminUserId} to {RecipientEmail} at {Timestamp}",
+                adminUserId,
+                request.SendTo,
+                DateTime.UtcNow);
+
+            return Ok(ApiResponse.Ok("Invitation email sent"));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to send invite email by admin {AdminUserId} to {RecipientEmail}",
+                adminUserId,
+                request.SendTo);
+
+            return StatusCode(500, ApiResponse.Fail("Failed to send email. Please try again."));
+        }
+    }
+
+    private static bool IsValidEmail(string email)
+    {
+        try
+        {
+            var addr = new System.Net.Mail.MailAddress(email);
+            return addr.Address == email.Trim();
+        }
+        catch
+        {
+            return false;
+        }
+    }
 }
 
 public class AdminDashboardResponse
@@ -2230,4 +2303,11 @@ public class BulkApproveResponse
 public class BulkGenerateSummariesResponse
 {
     public int QueuedCount { get; set; }
+}
+
+public class SendInviteEmailRequest
+{
+    public string SendTo { get; set; } = string.Empty;
+    public string Subject { get; set; } = string.Empty;
+    public string Body { get; set; } = string.Empty;
 }
