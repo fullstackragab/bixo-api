@@ -1939,8 +1939,8 @@ Declining will not affect your visibility for future opportunities.";
                     RoleTitle = roleTitle,
                     Message = adjustmentSuggestion,
                     ShortlistId = shortlistId,
-                    EditUrl = $"{_emailSettings.FrontendUrl}/company/shortlists/{shortlistId}/edit",
-                    CloseUrl = $"{_emailSettings.FrontendUrl}/company/shortlists/{shortlistId}"
+                    EditUrl = shortlistUrl,
+                    CloseUrl = shortlistUrl
                 });
                 break;
 
