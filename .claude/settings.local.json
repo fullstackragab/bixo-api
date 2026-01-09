@@ -21,7 +21,10 @@
       "Bash(curl:*)",
       "WebFetch(domain:github.com)",
       "Bash(git remote add:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(git check-ignore:*)",
+      "Bash(openssl rand:*)",
+      "Bash(timeout 10 dotnet run:*)"
     ]
   }
 }

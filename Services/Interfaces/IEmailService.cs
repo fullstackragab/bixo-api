@@ -76,6 +76,20 @@ public interface IEmailService
 
     /// <summary>Sends a custom invite email from admin to a recipient</summary>
     Task SendInviteEmailAsync(InviteEmailNotification notification);
+
+    // === Public Shortlist Request Emails ===
+
+    /// <summary>Sent to company when they submit a public shortlist request</summary>
+    Task SendShortlistRequestConfirmationAsync(ShortlistRequestConfirmationNotification notification);
+
+    /// <summary>Sent to company with magic link to view/approve shortlist</summary>
+    Task SendShortlistMagicLinkAsync(ShortlistMagicLinkNotification notification);
+
+    /// <summary>Sent to company when admin declines their request</summary>
+    Task SendShortlistDeclinedAsync(ShortlistDeclinedNotification notification);
+
+    /// <summary>Sent to admin when a new public shortlist request is submitted</summary>
+    Task SendAdminPublicRequestNotificationAsync(AdminPublicRequestNotification notification);
 }
 
 public class SupportNotification
@@ -310,4 +324,51 @@ public class InviteEmailNotification
     public string SendTo { get; set; } = string.Empty;
     public string Subject { get; set; } = string.Empty;
     public string Body { get; set; } = string.Empty;
+}
+
+// === Public Shortlist Request Notification Classes ===
+
+/// <summary>Sent to company when they submit a public shortlist request</summary>
+public class ShortlistRequestConfirmationNotification
+{
+    public string Email { get; set; } = string.Empty;
+    public string? CompanyName { get; set; }
+    public string RoleTitle { get; set; } = string.Empty;
+    public Guid ShortlistId { get; set; }
+}
+
+/// <summary>Sent to company with magic link to view/approve shortlist</summary>
+public class ShortlistMagicLinkNotification
+{
+    public string Email { get; set; } = string.Empty;
+    public string? CompanyName { get; set; }
+    public string RoleTitle { get; set; } = string.Empty;
+    public Guid ShortlistId { get; set; }
+    public string MagicLinkUrl { get; set; } = string.Empty;
+    public int CandidateCount { get; set; }
+    public decimal ProposedPrice { get; set; }
+}
+
+/// <summary>Sent to company when admin declines their request</summary>
+public class ShortlistDeclinedNotification
+{
+    public string Email { get; set; } = string.Empty;
+    public string? CompanyName { get; set; }
+    public string RoleTitle { get; set; } = string.Empty;
+    public string Reason { get; set; } = string.Empty;
+    public Guid ShortlistId { get; set; }
+}
+
+/// <summary>Sent to admin when a new public shortlist request is submitted</summary>
+public class AdminPublicRequestNotification
+{
+    public Guid ShortlistId { get; set; }
+    public string CompanyEmail { get; set; } = string.Empty;
+    public string? CompanyName { get; set; }
+    public string RoleTitle { get; set; } = string.Empty;
+    public string TechStack { get; set; } = string.Empty;
+    public string Seniority { get; set; } = string.Empty;
+    public string Location { get; set; } = string.Empty;
+    public string? Notes { get; set; }
+    public DateTime CreatedAt { get; set; }
 }

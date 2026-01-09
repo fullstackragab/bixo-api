@@ -1,4 +1,5 @@
 using bixo_api.Models.DTOs.Company;
+using bixo_api.Models.Entities;
 
 namespace bixo_api.Services.Interfaces;
 
@@ -11,6 +12,19 @@ public interface ICompanyService
     Task<SavedCandidateResponse> SaveCandidateAsync(Guid companyId, SaveCandidateRequest request);
     Task RemoveSavedCandidateAsync(Guid companyId, Guid candidateId);
     Task<List<SavedCandidateResponse>> GetSavedCandidatesAsync(Guid companyId);
+
+    // === Passwordless Company Support ===
+
+    /// <summary>
+    /// Find an existing company by contact email, or create a new passwordless company.
+    /// Passwordless companies have no user account - they access via magic links.
+    /// </summary>
+    Task<Company> FindOrCreateByEmailAsync(string email, string? companyName = null);
+
+    /// <summary>
+    /// Get company by ID (for internal use).
+    /// </summary>
+    Task<Company?> GetByIdAsync(Guid companyId);
 }
 
 public class CandidateDetailResponse

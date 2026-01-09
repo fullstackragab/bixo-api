@@ -1,4 +1,5 @@
 using bixo_api.Models.DTOs.Shortlist;
+using bixo_api.Models.Entities;
 using bixo_api.Models.Enums;
 
 namespace bixo_api.Services.Interfaces;
@@ -10,6 +11,45 @@ public interface IShortlistService
     Task<ShortlistDetailResponse?> GetShortlistAsync(Guid companyId, Guid shortlistId);
     Task<List<ShortlistResponse>> GetCompanyShortlistsAsync(Guid companyId);
     Task ProcessShortlistAsync(Guid shortlistId);
+
+    // === Public Request Flow (no authentication) ===
+
+    /// <summary>
+    /// Create a shortlist request from a public submission (no auth required).
+    /// Finds or creates a passwordless company by email.
+    /// </summary>
+    Task<PublicRequestResult> CreatePublicRequestAsync(PublicShortlistRequestDto dto);
+
+    /// <summary>
+    /// Generate a magic-link token for shortlist access.
+    /// Tokens expire after 7 days and are single-use for approval.
+    /// </summary>
+    Task<string> GenerateMagicLinkTokenAsync(Guid shortlistId);
+
+    /// <summary>
+    /// Validate a magic-link token and return the shortlist ID if valid.
+    /// </summary>
+    Task<ShortlistAccessToken?> ValidateMagicLinkTokenAsync(string token);
+
+    /// <summary>
+    /// Get shortlist view for magic-link access (limited data until delivered).
+    /// </summary>
+    Task<MagicLinkShortlistViewDto?> GetShortlistByTokenAsync(string token);
+
+    /// <summary>
+    /// Approve pricing via magic-link token (marks token as used).
+    /// </summary>
+    Task<ApproveViaTokenResult> ApproveViaTokenAsync(string token);
+
+    /// <summary>
+    /// Admin declines a shortlist request (terminal state).
+    /// </summary>
+    Task<DeclineResult> DeclineByAdminAsync(Guid shortlistId, Guid adminUserId, string reason);
+
+    /// <summary>
+    /// Download candidate CV via magic-link token (only after delivery).
+    /// </summary>
+    Task<CandidateCvResult> GetCandidateCvByTokenAsync(Guid candidateId, string token);
 
     /// <summary>
     /// Calculate the estimated price for a shortlist before payment authorization.
@@ -221,4 +261,37 @@ public class ShortlistEmailRecord
     public string SentTo { get; set; } = string.Empty;
     public Guid? SentBy { get; set; }
     public bool IsResend { get; set; }
+}
+
+// === Public Request Flow Results ===
+
+public class PublicRequestResult
+{
+    public bool Success { get; set; }
+    public string? ErrorMessage { get; set; }
+    public Guid? ShortlistId { get; set; }
+    public Guid? CompanyId { get; set; }
+}
+
+public class ApproveViaTokenResult
+{
+    public bool Success { get; set; }
+    public string? ErrorMessage { get; set; }
+    public Guid? ShortlistId { get; set; }
+}
+
+public class DeclineResult
+{
+    public bool Success { get; set; }
+    public string? ErrorMessage { get; set; }
+}
+
+public class CandidateCvResult
+{
+    public bool Success { get; set; }
+    public string? ErrorMessage { get; set; }
+    public string? ErrorCode { get; set; } // INVALID_TOKEN, NOT_DELIVERED, NOT_FOUND
+    public Stream? FileStream { get; set; }
+    public string? FileName { get; set; }
+    public string? ContentType { get; set; }
 }

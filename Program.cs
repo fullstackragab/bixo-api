@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using bixo_api.Configuration;
 using bixo_api.Data;
+using bixo_api.Middleware;
 using bixo_api.Services;
 using bixo_api.Services.Interfaces;
 using bixo_api.Services.Payments;
@@ -118,6 +119,9 @@ else
 }
 
 app.UseCors();
+
+// Rate limiting for public endpoints (before auth to reject early)
+app.UsePublicEndpointRateLimiting();
 
 app.UseAuthentication();
 app.UseAuthorization();

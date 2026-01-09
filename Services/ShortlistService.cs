@@ -1,4 +1,5 @@
 using System.Data;
+using System.Security.Cryptography;
 using System.Text.Json;
 using Dapper;
 using Microsoft.Extensions.Options;
@@ -19,6 +20,8 @@ public class ShortlistService : IShortlistService
     private readonly IMatchingService _matchingService;
     private readonly IEmailService _emailService;
     private readonly IPaymentService _paymentService;
+    private readonly ICompanyService _companyService;
+    private readonly IS3StorageService _s3Service;
     private readonly EmailSettings _emailSettings;
     private readonly ILogger<ShortlistService> _logger;
 
@@ -31,11 +34,16 @@ public class ShortlistService : IShortlistService
     // Default base price per shortlist
     private const decimal DEFAULT_BASE_PRICE = 299m;
 
+    // Magic link token expiry in days
+    private const int MAGIC_LINK_EXPIRY_DAYS = 7;
+
     public ShortlistService(
         IDbConnectionFactory db,
         IMatchingService matchingService,
         IEmailService emailService,
         IPaymentService paymentService,
+        ICompanyService companyService,
+        IS3StorageService s3Service,
         IOptions<EmailSettings> emailSettings,
         ILogger<ShortlistService> logger)
     {
@@ -43,6 +51,8 @@ public class ShortlistService : IShortlistService
         _matchingService = matchingService;
         _emailService = emailService;
         _paymentService = paymentService;
+        _companyService = companyService;
+        _s3Service = s3Service;
         _emailSettings = emailSettings.Value;
         _logger = logger;
     }
@@ -1693,13 +1703,14 @@ Declining will not affect your visibility for future opportunities.";
             return false;
         }
 
-        // Get shortlist and company info for email
+        // Get shortlist and company info for email (supports passwordless companies)
         var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
             SELECT sr.id, sr.role_title, sr.outcome_reason, sr.adjustment_suggestion, sr.extension_notes, sr.scope_approval_notes,
-                   c.id as company_id, c.company_name, u.email as company_email
+                   c.id as company_id, c.company_name, c.contact_email, c.user_id,
+                   u.email as user_email
             FROM shortlist_requests sr
             JOIN companies c ON c.id = sr.company_id
-            JOIN users u ON u.id = c.user_id
+            LEFT JOIN users u ON u.id = c.user_id
             WHERE sr.id = @ShortlistRequestId",
             new { ShortlistRequestId = shortlistRequestId });
 
@@ -1709,14 +1720,28 @@ Declining will not affect your visibility for future opportunities.";
             return false;
         }
 
-        var companyEmail = (string)shortlist.company_email;
+        // Use contact_email if set, otherwise user email
+        var companyEmail = !string.IsNullOrEmpty((string?)shortlist.contact_email)
+            ? (string?)shortlist.contact_email
+            : (string?)shortlist.user_email;
+
+        if (string.IsNullOrEmpty(companyEmail))
+        {
+            _logger.LogWarning("No email found for company on shortlist {ShortlistId}", shortlistRequestId);
+            return false;
+        }
+
         var companyName = shortlist.company_name as string ?? "";
         var roleTitle = (string)shortlist.role_title;
         var outcomeReason = shortlist.outcome_reason as string ?? "";
         var adjustmentSuggestion = shortlist.adjustment_suggestion as string ?? "";
         var extensionNotes = shortlist.extension_notes as string ?? "";
         var scopeApprovalNotes = shortlist.scope_approval_notes as string ?? "";
-        var shortlistUrl = $"{_emailSettings.FrontendUrl}/company/shortlists/{shortlistRequestId}";
+
+        // Always use magic links for shortlist emails - provides direct access without login
+        // Users with accounts can still access via dashboard if they prefer
+        var token = await GenerateMagicLinkTokenAsync(shortlistRequestId);
+        var shortlistUrl = $"{_emailSettings.FrontendUrl}/shortlist/view?token={token}";
 
         // Extract decline reason from scope_approval_notes if present
         var declineReason = "";
@@ -1782,7 +1807,8 @@ Declining will not affect your visibility for future opportunities.";
 
         // Get shortlist info (including fields needed for all email types)
         var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
-            SELECT sr.role_title, sr.outcome_reason, sr.adjustment_suggestion, sr.extension_notes, c.company_name
+            SELECT sr.role_title, sr.outcome_reason, sr.adjustment_suggestion, sr.extension_notes,
+                   c.company_name, c.user_id
             FROM shortlist_requests sr
             JOIN companies c ON c.id = sr.company_id
             WHERE sr.id = @ShortlistRequestId",
@@ -1798,7 +1824,10 @@ Declining will not affect your visibility for future opportunities.";
         var outcomeReason = shortlist.outcome_reason as string ?? "";
         var adjustmentSuggestion = shortlist.adjustment_suggestion as string ?? "";
         var extensionNotes = shortlist.extension_notes as string ?? "";
-        var shortlistUrl = $"{_emailSettings.FrontendUrl}/company/shortlists/{shortlistRequestId}";
+
+        // Always use magic links for shortlist emails - provides direct access without login
+        var token = await GenerateMagicLinkTokenAsync(shortlistRequestId);
+        var shortlistUrl = $"{_emailSettings.FrontendUrl}/shortlist/view?token={token}";
 
         // Send the email
         await SendEmailForEventAsync(emailEvent, sentTo, roleTitle, shortlistRequestId, shortlistUrl, companyName, outcomeReason, adjustmentSuggestion, extensionNotes);
@@ -1974,6 +2003,505 @@ Declining will not affect your visibility for future opportunities.";
             default:
                 throw new ArgumentOutOfRangeException(nameof(emailEvent), emailEvent, "Unknown email event type");
         }
+    }
+
+    // === Public Request Flow Methods ===
+
+    public async Task<PublicRequestResult> CreatePublicRequestAsync(PublicShortlistRequestDto dto)
+    {
+        try
+        {
+            // Find or create passwordless company by email
+            var company = await _companyService.FindOrCreateByEmailAsync(dto.CompanyEmail, dto.CompanyName);
+
+            using var connection = _db.CreateConnection();
+
+            var shortlistId = Guid.NewGuid();
+            var now = DateTime.UtcNow;
+
+            // Parse seniority from string
+            SeniorityLevel? seniorityLevel = dto.Seniority?.ToLowerInvariant() switch
+            {
+                "junior" => SeniorityLevel.Junior,
+                "mid" => SeniorityLevel.Mid,
+                "senior" => SeniorityLevel.Senior,
+                "lead" => SeniorityLevel.Lead,
+                "principal" => SeniorityLevel.Principal,
+                _ => null
+            };
+
+            // Determine if remote from location string
+            var isRemote = dto.Location?.ToLowerInvariant().Contains("remote") ?? true;
+
+            await connection.ExecuteAsync(@"
+                INSERT INTO shortlist_requests (id, company_id, role_title, tech_stack_required, seniority_required,
+                                               location_preference, is_remote, additional_notes, status, created_at,
+                                               pricing_type)
+                VALUES (@Id, @CompanyId, @RoleTitle, @TechStackRequired::jsonb, @SeniorityRequired,
+                        @LocationPreference, @IsRemote, @AdditionalNotes, @Status, @CreatedAt, @PricingType)",
+                new
+                {
+                    Id = shortlistId,
+                    CompanyId = company.Id,
+                    RoleTitle = dto.RoleTitle,
+                    TechStackRequired = JsonSerializer.Serialize(dto.TechStack.Split(',').Select(s => s.Trim()).ToList()),
+                    SeniorityRequired = seniorityLevel.HasValue ? (int?)seniorityLevel.Value : null,
+                    LocationPreference = dto.Location,
+                    IsRemote = isRemote,
+                    AdditionalNotes = dto.Notes,
+                    Status = (int)ShortlistStatus.Submitted,
+                    CreatedAt = now,
+                    PricingType = "new"
+                });
+
+            // Send confirmation email to company
+            _ = _emailService.SendShortlistRequestConfirmationAsync(new ShortlistRequestConfirmationNotification
+            {
+                Email = dto.CompanyEmail,
+                CompanyName = dto.CompanyName ?? company.CompanyName,
+                RoleTitle = dto.RoleTitle,
+                ShortlistId = shortlistId
+            });
+
+            // Send admin notification
+            _ = _emailService.SendAdminPublicRequestNotificationAsync(new AdminPublicRequestNotification
+            {
+                ShortlistId = shortlistId,
+                CompanyEmail = dto.CompanyEmail,
+                CompanyName = dto.CompanyName ?? company.CompanyName,
+                RoleTitle = dto.RoleTitle,
+                TechStack = dto.TechStack,
+                Seniority = dto.Seniority,
+                Location = dto.Location,
+                Notes = dto.Notes,
+                CreatedAt = now
+            });
+
+            _logger.LogInformation("Public shortlist request created: {ShortlistId} for {Email}", shortlistId, dto.CompanyEmail);
+
+            return new PublicRequestResult
+            {
+                Success = true,
+                ShortlistId = shortlistId,
+                CompanyId = company.Id
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to create public shortlist request for {Email}", dto.CompanyEmail);
+            return new PublicRequestResult
+            {
+                Success = false,
+                ErrorMessage = "Failed to create request. Please try again."
+            };
+        }
+    }
+
+    public async Task<string> GenerateMagicLinkTokenAsync(Guid shortlistId)
+    {
+        using var connection = _db.CreateConnection();
+
+        // Generate secure token (64 bytes, base64 encoded)
+        var tokenBytes = RandomNumberGenerator.GetBytes(64);
+        var token = Convert.ToBase64String(tokenBytes)
+            .Replace("+", "-")
+            .Replace("/", "_")
+            .TrimEnd('=');
+
+        var expiresAt = DateTime.UtcNow.AddDays(MAGIC_LINK_EXPIRY_DAYS);
+
+        await connection.ExecuteAsync(@"
+            INSERT INTO shortlist_access_tokens (shortlist_request_id, token, expires_at, created_at)
+            VALUES (@ShortlistRequestId, @Token, @ExpiresAt, @CreatedAt)",
+            new
+            {
+                ShortlistRequestId = shortlistId,
+                Token = token,
+                ExpiresAt = expiresAt,
+                CreatedAt = DateTime.UtcNow
+            });
+
+        _logger.LogInformation("Magic link token generated for shortlist {ShortlistId}", shortlistId);
+
+        return token;
+    }
+
+    public async Task<ShortlistAccessToken?> ValidateMagicLinkTokenAsync(string token)
+    {
+        using var connection = _db.CreateConnection();
+
+        var tokenRecord = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT id, shortlist_request_id, token, expires_at, used_at, created_at
+            FROM shortlist_access_tokens
+            WHERE token = @Token",
+            new { Token = token });
+
+        if (tokenRecord == null)
+        {
+            return null;
+        }
+
+        return new ShortlistAccessToken
+        {
+            Id = (Guid)tokenRecord.id,
+            ShortlistRequestId = (Guid)tokenRecord.shortlist_request_id,
+            Token = (string)tokenRecord.token,
+            ExpiresAt = (DateTime)tokenRecord.expires_at,
+            UsedAt = tokenRecord.used_at != null ? (DateTime?)tokenRecord.used_at : null,
+            CreatedAt = (DateTime)tokenRecord.created_at
+        };
+    }
+
+    public async Task<MagicLinkShortlistViewDto?> GetShortlistByTokenAsync(string token)
+    {
+        var tokenRecord = await ValidateMagicLinkTokenAsync(token);
+        if (tokenRecord == null || !tokenRecord.IsValidForView)
+        {
+            return null;
+        }
+
+        using var connection = _db.CreateConnection();
+
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT sr.id, sr.role_title, sr.tech_stack_required, sr.seniority_required,
+                   sr.location_preference, sr.status, sr.created_at,
+                   sr.proposed_price, sr.proposed_candidates, sr.scope_approval_notes
+            FROM shortlist_requests sr
+            WHERE sr.id = @ShortlistId",
+            new { ShortlistId = tokenRecord.ShortlistRequestId });
+
+        if (shortlist == null)
+        {
+            return null;
+        }
+
+        var status = (ShortlistStatus)(int)shortlist.status;
+        var result = new MagicLinkShortlistViewDto
+        {
+            Id = (Guid)shortlist.id,
+            RoleTitle = (string)shortlist.role_title,
+            TechStack = shortlist.tech_stack_required != null ? string.Join(", ", ParseTechStack((string)shortlist.tech_stack_required)) : null,
+            Seniority = shortlist.seniority_required != null ? ((SeniorityLevel)(int)shortlist.seniority_required).ToString() : null,
+            Location = shortlist.location_preference,
+            Status = status,
+            CreatedAt = (DateTime)shortlist.created_at,
+            ProposedPrice = shortlist.proposed_price,
+            ScopeNotes = shortlist.scope_approval_notes
+        };
+
+        // Get candidate count
+        var candidateCount = await connection.QueryFirstOrDefaultAsync<int>(@"
+            SELECT COUNT(*) FROM shortlist_candidates WHERE shortlist_request_id = @ShortlistId",
+            new { ShortlistId = tokenRecord.ShortlistRequestId });
+
+        result.CandidateCount = candidateCount;
+
+        // If status is PricingPending, include limited candidate previews
+        if (status == ShortlistStatus.PricingPending || status == ShortlistStatus.Approved)
+        {
+            var previews = await connection.QueryAsync<dynamic>(@"
+                SELECT c.desired_role, c.seniority_estimate, c.location_preference, sc.match_reason, sc.rank
+                FROM shortlist_candidates sc
+                JOIN candidates c ON c.id = sc.candidate_id
+                WHERE sc.shortlist_request_id = @ShortlistId AND sc.admin_approved = TRUE
+                ORDER BY sc.rank",
+                new { ShortlistId = tokenRecord.ShortlistRequestId });
+
+            var index = 1;
+            result.CandidatePreviews = previews.Select(p => new MagicLinkCandidatePreviewDto
+            {
+                Index = index++,
+                Role = p.desired_role,
+                Seniority = p.seniority_estimate != null ? ((SeniorityLevel)(int)p.seniority_estimate).ToString() : null,
+                TopSkills = new List<string>(), // Skills would require another join - keeping simple for now
+                Region = ExtractCountry(p.location_preference),
+                MatchReason = p.match_reason
+            }).ToList();
+        }
+
+        // If status is Delivered or Completed, include full candidate info
+        if (status == ShortlistStatus.Delivered || status == ShortlistStatus.Completed)
+        {
+            var candidates = await connection.QueryAsync<dynamic>(@"
+                SELECT c.id, c.first_name, c.last_name, c.desired_role, c.seniority_estimate,
+                       c.location_preference, c.linkedin_url, c.github_url, c.github_summary,
+                       sc.match_reason, sc.rank
+                FROM shortlist_candidates sc
+                JOIN candidates c ON c.id = sc.candidate_id
+                WHERE sc.shortlist_request_id = @ShortlistId AND sc.admin_approved = TRUE
+                ORDER BY sc.rank",
+                new { ShortlistId = tokenRecord.ShortlistRequestId });
+
+            result.Candidates = candidates.Select(c => new MagicLinkCandidateDto
+            {
+                Id = (Guid)c.id,
+                FirstName = c.first_name,
+                LastName = c.last_name,
+                Role = c.desired_role,
+                Seniority = c.seniority_estimate != null ? ((SeniorityLevel)(int)c.seniority_estimate).ToString() : null,
+                Skills = new List<string>(),
+                Location = c.location_preference,
+                LinkedInUrl = c.linkedin_url,
+                GitHubUrl = c.github_url,
+                GitHubSummary = c.github_summary,
+                MatchReason = c.match_reason,
+                Rank = (int)c.rank
+            }).ToList();
+        }
+
+        return result;
+    }
+
+    public async Task<ApproveViaTokenResult> ApproveViaTokenAsync(string token)
+    {
+        var tokenRecord = await ValidateMagicLinkTokenAsync(token);
+        if (tokenRecord == null)
+        {
+            return new ApproveViaTokenResult { Success = false, ErrorMessage = "Invalid token" };
+        }
+
+        if (!tokenRecord.IsValidForApproval)
+        {
+            return new ApproveViaTokenResult { Success = false, ErrorMessage = "Token expired or already used" };
+        }
+
+        using var connection = _db.CreateConnection();
+
+        // Get shortlist and verify status
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT sr.id, sr.status, sr.company_id, sr.role_title, c.contact_email, c.company_name
+            FROM shortlist_requests sr
+            JOIN companies c ON c.id = sr.company_id
+            WHERE sr.id = @ShortlistId",
+            new { ShortlistId = tokenRecord.ShortlistRequestId });
+
+        if (shortlist == null)
+        {
+            return new ApproveViaTokenResult { Success = false, ErrorMessage = "Shortlist not found" };
+        }
+
+        var currentStatus = (ShortlistStatus)(int)shortlist.status;
+        if (currentStatus != ShortlistStatus.PricingPending)
+        {
+            return new ApproveViaTokenResult { Success = false, ErrorMessage = $"Cannot approve shortlist in status: {currentStatus}" };
+        }
+
+        // Update shortlist status to Approved
+        await connection.ExecuteAsync(@"
+            UPDATE shortlist_requests
+            SET status = @NewStatus, scope_approved_at = @Now
+            WHERE id = @ShortlistId",
+            new
+            {
+                ShortlistId = tokenRecord.ShortlistRequestId,
+                NewStatus = (int)ShortlistStatus.Approved,
+                Now = DateTime.UtcNow
+            });
+
+        // Mark token as used
+        await connection.ExecuteAsync(@"
+            UPDATE shortlist_access_tokens SET used_at = @Now WHERE id = @TokenId",
+            new { TokenId = tokenRecord.Id, Now = DateTime.UtcNow });
+
+        // Notify admin
+        _ = _emailService.SendAdminScopeApprovedNotificationAsync(new AdminScopeApprovedNotification
+        {
+            ShortlistId = tokenRecord.ShortlistRequestId,
+            CompanyName = shortlist.company_name ?? "Unknown",
+            RoleTitle = (string)shortlist.role_title,
+            ApprovedPrice = 0, // Price is in another field, would need to add
+            ProposedCandidates = 0,
+            ApprovedAt = DateTime.UtcNow
+        });
+
+        _logger.LogInformation("Shortlist {ShortlistId} approved via magic link", tokenRecord.ShortlistRequestId);
+
+        return new ApproveViaTokenResult
+        {
+            Success = true,
+            ShortlistId = tokenRecord.ShortlistRequestId
+        };
+    }
+
+    public async Task<DeclineResult> DeclineByAdminAsync(Guid shortlistId, Guid adminUserId, string reason)
+    {
+        using var connection = _db.CreateConnection();
+
+        // Get shortlist and company info
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT sr.id, sr.status, sr.role_title, c.contact_email, c.company_name
+            FROM shortlist_requests sr
+            JOIN companies c ON c.id = sr.company_id
+            WHERE sr.id = @ShortlistId",
+            new { ShortlistId = shortlistId });
+
+        if (shortlist == null)
+        {
+            return new DeclineResult { Success = false, ErrorMessage = "Shortlist not found" };
+        }
+
+        var currentStatus = (ShortlistStatus)(int)shortlist.status;
+
+        // Validate transition
+        if (!ShortlistStatusTransitions.IsValidTransition(currentStatus, ShortlistStatus.Declined))
+        {
+            return new DeclineResult { Success = false, ErrorMessage = $"Cannot decline shortlist in status: {currentStatus}" };
+        }
+
+        // Update status to Declined
+        await connection.ExecuteAsync(@"
+            UPDATE shortlist_requests
+            SET status = @NewStatus, outcome = @Outcome, outcome_reason = @Reason,
+                outcome_decided_at = @Now, outcome_decided_by = @AdminUserId, updated_at = @Now
+            WHERE id = @ShortlistId",
+            new
+            {
+                ShortlistId = shortlistId,
+                NewStatus = (int)ShortlistStatus.Declined,
+                Outcome = (int)ShortlistOutcome.Cancelled,
+                Reason = reason,
+                Now = DateTime.UtcNow,
+                AdminUserId = adminUserId
+            });
+
+        // Send email to company if we have their email
+        if (!string.IsNullOrEmpty(shortlist.contact_email))
+        {
+            _ = _emailService.SendShortlistDeclinedAsync(new ShortlistDeclinedNotification
+            {
+                Email = (string)shortlist.contact_email,
+                CompanyName = shortlist.company_name,
+                RoleTitle = (string)shortlist.role_title,
+                Reason = reason,
+                ShortlistId = shortlistId
+            });
+        }
+
+        _logger.LogInformation("Shortlist {ShortlistId} declined by admin {AdminUserId}: {Reason}", shortlistId, adminUserId, reason);
+
+        return new DeclineResult { Success = true };
+    }
+
+    public async Task<CandidateCvResult> GetCandidateCvByTokenAsync(Guid candidateId, string token)
+    {
+        // 1. Validate the magic link token
+        var tokenRecord = await ValidateMagicLinkTokenAsync(token);
+        if (tokenRecord == null || !tokenRecord.IsValidForView)
+        {
+            return new CandidateCvResult
+            {
+                Success = false,
+                ErrorCode = "INVALID_TOKEN",
+                ErrorMessage = "Invalid or expired token"
+            };
+        }
+
+        using var connection = _db.CreateConnection();
+
+        // 2. Verify shortlist status is Delivered or Completed
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT status FROM shortlist_requests WHERE id = @ShortlistId",
+            new { ShortlistId = tokenRecord.ShortlistRequestId });
+
+        if (shortlist == null)
+        {
+            return new CandidateCvResult
+            {
+                Success = false,
+                ErrorCode = "NOT_FOUND",
+                ErrorMessage = "Shortlist not found"
+            };
+        }
+
+        var status = (ShortlistStatus)(int)shortlist.status;
+        if (status != ShortlistStatus.Delivered && status != ShortlistStatus.Completed)
+        {
+            return new CandidateCvResult
+            {
+                Success = false,
+                ErrorCode = "NOT_DELIVERED",
+                ErrorMessage = "CV download is only available after shortlist delivery"
+            };
+        }
+
+        // 3. Verify candidate belongs to this shortlist
+        var candidate = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT c.first_name, c.last_name, c.cv_file_key, c.cv_original_file_name
+            FROM candidates c
+            JOIN shortlist_candidates sc ON sc.candidate_id = c.id
+            WHERE c.id = @CandidateId AND sc.shortlist_request_id = @ShortlistId",
+            new { CandidateId = candidateId, ShortlistId = tokenRecord.ShortlistRequestId });
+
+        if (candidate == null)
+        {
+            return new CandidateCvResult
+            {
+                Success = false,
+                ErrorCode = "NOT_FOUND",
+                ErrorMessage = "Candidate not found in this shortlist"
+            };
+        }
+
+        // 4. Check if candidate has a CV
+        var cvFileKey = candidate.cv_file_key as string;
+        if (string.IsNullOrEmpty(cvFileKey))
+        {
+            return new CandidateCvResult
+            {
+                Success = false,
+                ErrorCode = "NOT_FOUND",
+                ErrorMessage = "No CV on file for this candidate"
+            };
+        }
+
+        // 5. Download CV from S3
+        try
+        {
+            var stream = await _s3Service.DownloadFileAsync(cvFileKey);
+
+            // Generate a clean filename
+            var firstName = candidate.first_name as string ?? "Candidate";
+            var lastName = candidate.last_name as string ?? "";
+            var originalFileName = candidate.cv_original_file_name as string;
+            var extension = Path.GetExtension(originalFileName ?? ".pdf");
+            var cleanFileName = $"{firstName}_{lastName}_CV{extension}".Replace(" ", "_");
+
+            // Determine content type
+            var contentType = extension.ToLowerInvariant() switch
+            {
+                ".pdf" => "application/pdf",
+                ".doc" => "application/msword",
+                ".docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                _ => "application/octet-stream"
+            };
+
+            return new CandidateCvResult
+            {
+                Success = true,
+                FileStream = stream,
+                FileName = cleanFileName,
+                ContentType = contentType
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to download CV for candidate {CandidateId}", candidateId);
+            return new CandidateCvResult
+            {
+                Success = false,
+                ErrorCode = "NOT_FOUND",
+                ErrorMessage = "Failed to retrieve CV file"
+            };
+        }
+    }
+
+    private static string? ExtractCountry(string? location)
+    {
+        if (string.IsNullOrEmpty(location)) return null;
+
+        // Simple extraction - take last part after comma or the whole string
+        var parts = location.Split(',');
+        return parts.Length > 1 ? parts[^1].Trim() : location.Trim();
     }
 
     private List<string> ParseTechStack(string? techStackJson)

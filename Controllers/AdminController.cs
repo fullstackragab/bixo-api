@@ -26,6 +26,7 @@ public class AdminController : ControllerBase
     private readonly IEmailService _emailService;
     private readonly INotificationService _notificationService;
     private readonly IGitHubEnrichmentService _gitHubEnrichmentService;
+    private readonly IConfiguration _configuration;
     private readonly EmailSettings _emailSettings;
     private readonly ILogger<AdminController> _logger;
 
@@ -39,6 +40,7 @@ public class AdminController : ControllerBase
         IEmailService emailService,
         INotificationService notificationService,
         IGitHubEnrichmentService gitHubEnrichmentService,
+        IConfiguration configuration,
         IOptions<EmailSettings> emailSettings,
         ILogger<AdminController> logger)
     {
@@ -51,6 +53,7 @@ public class AdminController : ControllerBase
         _emailService = emailService;
         _notificationService = notificationService;
         _gitHubEnrichmentService = gitHubEnrichmentService;
+        _configuration = configuration;
         _emailSettings = emailSettings.Value;
         _logger = logger;
     }
@@ -1487,6 +1490,103 @@ public class AdminController : ControllerBase
         }
     }
 
+    // === Magic Link & Decline Endpoints ===
+
+    /// <summary>
+    /// Generate and send magic link to company for shortlist access.
+    /// Token is valid for 7 days, single-use for approval.
+    /// </summary>
+    [HttpPost("shortlists/{id}/magic-link")]
+    public async Task<ActionResult<ApiResponse<SendMagicLinkResponse>>> SendMagicLink(Guid id)
+    {
+        using var connection = _db.CreateConnection();
+
+        // Get shortlist and company info
+        var shortlist = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT sr.id, sr.role_title, sr.status, sr.proposed_price, sr.proposed_candidates,
+                   c.contact_email, c.company_name
+            FROM shortlist_requests sr
+            JOIN companies c ON c.id = sr.company_id
+            WHERE sr.id = @Id",
+            new { Id = id });
+
+        if (shortlist == null)
+        {
+            return NotFound(ApiResponse<SendMagicLinkResponse>.Fail("Shortlist not found"));
+        }
+
+        var email = shortlist.contact_email as string;
+        if (string.IsNullOrEmpty(email))
+        {
+            // Try to get email from user if company has one
+            var userEmail = await connection.QueryFirstOrDefaultAsync<string>(@"
+                SELECT u.email FROM users u
+                JOIN companies c ON c.user_id = u.id
+                JOIN shortlist_requests sr ON sr.company_id = c.id
+                WHERE sr.id = @Id",
+                new { Id = id });
+
+            if (string.IsNullOrEmpty(userEmail))
+            {
+                return BadRequest(ApiResponse<SendMagicLinkResponse>.Fail("Company has no contact email"));
+            }
+            email = userEmail;
+        }
+
+        // Generate token
+        var token = await _shortlistService.GenerateMagicLinkTokenAsync(id);
+
+        // Build magic link URL
+        var magicLinkUrl = $"{_emailSettings.FrontendUrl}/shortlist/view?token={token}";
+
+        // Get candidate count
+        var candidateCount = await connection.QueryFirstOrDefaultAsync<int>(@"
+            SELECT COUNT(*) FROM shortlist_candidates
+            WHERE shortlist_request_id = @Id AND admin_approved = TRUE",
+            new { Id = id });
+
+        // Send email
+        await _emailService.SendShortlistMagicLinkAsync(new ShortlistMagicLinkNotification
+        {
+            Email = email,
+            CompanyName = shortlist.company_name,
+            RoleTitle = (string)shortlist.role_title,
+            ShortlistId = id,
+            MagicLinkUrl = magicLinkUrl,
+            CandidateCount = candidateCount,
+            ProposedPrice = shortlist.proposed_price ?? 0
+        });
+
+        return Ok(ApiResponse<SendMagicLinkResponse>.Ok(new SendMagicLinkResponse
+        {
+            Email = email,
+            Token = token,
+            ExpiresInDays = 7
+        }, "Magic link sent to company."));
+    }
+
+    /// <summary>
+    /// Admin declines a shortlist request.
+    /// Sets status to Declined (terminal state) and notifies company.
+    /// </summary>
+    [HttpPost("shortlists/{id}/decline")]
+    public async Task<ActionResult<ApiResponse>> DeclineShortlist(Guid id, [FromBody] AdminDeclineShortlistRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Reason))
+        {
+            return BadRequest(ApiResponse.Fail("Reason is required"));
+        }
+
+        var result = await _shortlistService.DeclineByAdminAsync(id, GetAdminUserId(), request.Reason);
+
+        if (!result.Success)
+        {
+            return BadRequest(ApiResponse.Fail(result.ErrorMessage ?? "Failed to decline shortlist"));
+        }
+
+        return Ok(ApiResponse.Ok("Shortlist declined. Company has been notified."));
+    }
+
     private Guid GetAdminUserId()
     {
         var userIdClaim = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier);
@@ -2310,4 +2410,19 @@ public class SendInviteEmailRequest
     public string SendTo { get; set; } = string.Empty;
     public string Subject { get; set; } = string.Empty;
     public string Body { get; set; } = string.Empty;
+}
+
+// === Magic Link & Decline DTOs ===
+
+public class SendMagicLinkResponse
+{
+    public string Email { get; set; } = string.Empty;
+    public string Token { get; set; } = string.Empty;
+    public int ExpiresInDays { get; set; }
+}
+
+public class AdminDeclineShortlistRequest
+{
+    /// <summary>Reason for declining the request</summary>
+    public string Reason { get; set; } = string.Empty;
 }

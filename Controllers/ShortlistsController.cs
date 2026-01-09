@@ -459,6 +459,113 @@ If you're interested in learning more, you can respond from your Bixo dashboard.
 
         return Ok(ApiResponse<List<ShortlistMessageDetailResponse>>.Ok(result));
     }
+
+    // === Public Request Flow (no authentication) ===
+
+    /// <summary>
+    /// Submit a shortlist request without authentication.
+    /// Companies can request a shortlist via this public endpoint.
+    /// </summary>
+    [HttpPost("public/request")]
+    [AllowAnonymous]
+    public async Task<ActionResult<ApiResponse<PublicRequestResponse>>> SubmitPublicRequest([FromBody] PublicShortlistRequestDto request)
+    {
+        try
+        {
+            var result = await _shortlistService.CreatePublicRequestAsync(request);
+            if (!result.Success)
+            {
+                return BadRequest(ApiResponse<PublicRequestResponse>.Fail(result.ErrorMessage ?? "Failed to create request"));
+            }
+
+            return Ok(ApiResponse<PublicRequestResponse>.Ok(new PublicRequestResponse
+            {
+                Message = "Request received. We'll review it and get back to you by email.",
+                RequestId = result.ShortlistId!.Value
+            }));
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(ApiResponse<PublicRequestResponse>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// View shortlist via magic-link token (no authentication).
+    /// Returns limited data until approved and delivered.
+    /// </summary>
+    [HttpGet("view")]
+    [AllowAnonymous]
+    public async Task<ActionResult<ApiResponse<MagicLinkShortlistViewDto>>> ViewByToken([FromQuery] string token)
+    {
+        if (string.IsNullOrEmpty(token))
+        {
+            return BadRequest(ApiResponse<MagicLinkShortlistViewDto>.Fail("Token is required"));
+        }
+
+        var result = await _shortlistService.GetShortlistByTokenAsync(token);
+        if (result == null)
+        {
+            return NotFound(ApiResponse<MagicLinkShortlistViewDto>.Fail("Invalid or expired token"));
+        }
+
+        return Ok(ApiResponse<MagicLinkShortlistViewDto>.Ok(result));
+    }
+
+    /// <summary>
+    /// Approve shortlist pricing via magic-link token (no authentication).
+    /// Marks the token as used after successful approval.
+    /// </summary>
+    [HttpPost("approve")]
+    [AllowAnonymous]
+    public async Task<ActionResult<ApiResponse<ApproveResponse>>> ApproveByToken([FromQuery] string token)
+    {
+        if (string.IsNullOrEmpty(token))
+        {
+            return BadRequest(ApiResponse<ApproveResponse>.Fail("Token is required"));
+        }
+
+        var result = await _shortlistService.ApproveViaTokenAsync(token);
+        if (!result.Success)
+        {
+            return BadRequest(ApiResponse<ApproveResponse>.Fail(result.ErrorMessage ?? "Approval failed"));
+        }
+
+        return Ok(ApiResponse<ApproveResponse>.Ok(new ApproveResponse
+        {
+            Message = "Shortlist approved. We'll prepare the delivery and notify you by email.",
+            ShortlistId = result.ShortlistId!.Value
+        }));
+    }
+
+    /// <summary>
+    /// Download candidate CV via magic-link token (no authentication).
+    /// Only available after shortlist is delivered.
+    /// </summary>
+    [HttpGet("candidate/{candidateId}/cv")]
+    [AllowAnonymous]
+    public async Task<IActionResult> DownloadCandidateCv(Guid candidateId, [FromQuery] string token)
+    {
+        if (string.IsNullOrEmpty(token))
+        {
+            return Unauthorized(new { success = false, message = "Token is required" });
+        }
+
+        var result = await _shortlistService.GetCandidateCvByTokenAsync(candidateId, token);
+
+        if (!result.Success)
+        {
+            return result.ErrorCode switch
+            {
+                "INVALID_TOKEN" => Unauthorized(new { success = false, message = result.ErrorMessage }),
+                "NOT_DELIVERED" => StatusCode(403, new { success = false, message = result.ErrorMessage }),
+                "NOT_FOUND" => NotFound(new { success = false, message = result.ErrorMessage }),
+                _ => BadRequest(new { success = false, message = result.ErrorMessage })
+            };
+        }
+
+        return File(result.FileStream!, result.ContentType!, result.FileName);
+    }
 }
 
 public class ShortlistMessageDetailResponse
@@ -545,6 +652,20 @@ public class DeclinePricingRequest
 {
     /// <summary>Optional reason for declining the pricing</summary>
     public string? Reason { get; set; }
+}
+
+// === Public Request Flow DTOs ===
+
+public class PublicRequestResponse
+{
+    public string Message { get; set; } = string.Empty;
+    public Guid RequestId { get; set; }
+}
+
+public class ApproveResponse
+{
+    public string Message { get; set; } = string.Empty;
+    public Guid ShortlistId { get; set; }
 }
 
 public class DeclineShortlistRequest

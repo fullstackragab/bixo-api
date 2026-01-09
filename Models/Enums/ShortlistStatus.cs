@@ -32,6 +32,9 @@ public enum ShortlistStatus
     /// <summary>Cancelled at any stage</summary>
     Cancelled = 7,
 
+    /// <summary>Admin declined the request (terminal state)</summary>
+    Declined = 8,
+
     /// <summary>Admin suggested adjustments, awaiting company response</summary>
     AwaitingAdjustment = 9
 }
@@ -60,13 +63,14 @@ public static class ShortlistStatusTransitions
 {
     private static readonly Dictionary<ShortlistStatus, HashSet<ShortlistStatus>> ValidTransitions = new()
     {
-        [ShortlistStatus.Submitted] = new() { ShortlistStatus.Processing, ShortlistStatus.PricingPending, ShortlistStatus.AwaitingAdjustment, ShortlistStatus.Cancelled },
-        [ShortlistStatus.Processing] = new() { ShortlistStatus.PricingPending, ShortlistStatus.AwaitingAdjustment, ShortlistStatus.Cancelled },
+        [ShortlistStatus.Submitted] = new() { ShortlistStatus.Processing, ShortlistStatus.PricingPending, ShortlistStatus.AwaitingAdjustment, ShortlistStatus.Cancelled, ShortlistStatus.Declined },
+        [ShortlistStatus.Processing] = new() { ShortlistStatus.PricingPending, ShortlistStatus.AwaitingAdjustment, ShortlistStatus.Cancelled, ShortlistStatus.Declined },
         [ShortlistStatus.PricingPending] = new() { ShortlistStatus.Approved, ShortlistStatus.Processing, ShortlistStatus.Cancelled },
         [ShortlistStatus.Approved] = new() { ShortlistStatus.Delivered, ShortlistStatus.Cancelled },
         [ShortlistStatus.Delivered] = new() { ShortlistStatus.Completed },
         [ShortlistStatus.Completed] = new(),
         [ShortlistStatus.Cancelled] = new(),
+        [ShortlistStatus.Declined] = new(), // Terminal state - no outbound transitions
         [ShortlistStatus.AwaitingAdjustment] = new() { ShortlistStatus.Processing, ShortlistStatus.Cancelled }
     };
 

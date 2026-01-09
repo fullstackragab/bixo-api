@@ -3,6 +3,7 @@ using bixo_api.Data;
 using bixo_api.Models.DTOs.Candidate;
 using bixo_api.Models.DTOs.Company;
 using bixo_api.Models.DTOs.Location;
+using bixo_api.Models.Entities;
 using bixo_api.Models.Enums;
 using bixo_api.Services.Interfaces;
 
@@ -682,5 +683,145 @@ public class CompanyService : ICompanyService
         // Add timezone preference
         var preferTimezone = request.LocationRanking?.PreferTimezone;
         parameters.Add("PreferTimezone", string.IsNullOrEmpty(preferTimezone) ? null : preferTimezone);
+    }
+
+    // === Passwordless Company Support ===
+
+    public async Task<Company> FindOrCreateByEmailAsync(string email, string? companyName = null)
+    {
+        using var connection = _db.CreateConnection();
+
+        // First try to find existing company by contact_email
+        var existing = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT id, user_id, contact_email, company_name, created_at, updated_at
+            FROM companies
+            WHERE contact_email = @Email",
+            new { Email = email.ToLowerInvariant() });
+
+        if (existing != null)
+        {
+            return new Company
+            {
+                Id = (Guid)existing.id,
+                UserId = existing.user_id != null ? (Guid?)existing.user_id : null,
+                ContactEmail = (string?)existing.contact_email,
+                CompanyName = (string?)existing.company_name ?? string.Empty,
+                CreatedAt = (DateTime)existing.created_at,
+                UpdatedAt = (DateTime)existing.updated_at
+            };
+        }
+
+        // Also check if there's a company with a user that has this email
+        var existingByUserEmail = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT c.id, c.user_id, c.contact_email, c.company_name, c.created_at, c.updated_at
+            FROM companies c
+            JOIN users u ON u.id = c.user_id
+            WHERE u.email = @Email",
+            new { Email = email.ToLowerInvariant() });
+
+        if (existingByUserEmail != null)
+        {
+            // Update contact_email to match user email for future lookups
+            await connection.ExecuteAsync(@"
+                UPDATE companies SET contact_email = @Email, updated_at = @Now WHERE id = @Id",
+                new { Id = (Guid)existingByUserEmail.id, Email = email.ToLowerInvariant(), Now = DateTime.UtcNow });
+
+            return new Company
+            {
+                Id = (Guid)existingByUserEmail.id,
+                UserId = existingByUserEmail.user_id != null ? (Guid?)existingByUserEmail.user_id : null,
+                ContactEmail = email.ToLowerInvariant(),
+                CompanyName = (string?)existingByUserEmail.company_name ?? string.Empty,
+                CreatedAt = (DateTime)existingByUserEmail.created_at,
+                UpdatedAt = DateTime.UtcNow
+            };
+        }
+
+        // Create new passwordless company (no user account)
+        var newCompanyId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+
+        // Try to infer company name from email domain if not provided
+        var inferredName = companyName;
+        if (string.IsNullOrEmpty(inferredName))
+        {
+            var domain = email.Split('@').LastOrDefault();
+            if (!string.IsNullOrEmpty(domain) && !IsCommonEmailDomain(domain))
+            {
+                inferredName = CapitalizeDomain(domain);
+            }
+        }
+
+        await connection.ExecuteAsync(@"
+            INSERT INTO companies (id, contact_email, company_name, subscription_tier, messages_remaining, created_at, updated_at)
+            VALUES (@Id, @ContactEmail, @CompanyName, @SubscriptionTier, @MessagesRemaining, @CreatedAt, @UpdatedAt)",
+            new
+            {
+                Id = newCompanyId,
+                ContactEmail = email.ToLowerInvariant(),
+                CompanyName = inferredName ?? string.Empty,
+                SubscriptionTier = (int)SubscriptionTier.Free,
+                MessagesRemaining = 5,
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+
+        return new Company
+        {
+            Id = newCompanyId,
+            UserId = null,
+            ContactEmail = email.ToLowerInvariant(),
+            CompanyName = inferredName ?? string.Empty,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+    }
+
+    public async Task<Company?> GetByIdAsync(Guid companyId)
+    {
+        using var connection = _db.CreateConnection();
+
+        var company = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+            SELECT id, user_id, contact_email, company_name, industry, company_size, website,
+                   subscription_tier, messages_remaining, created_at, updated_at
+            FROM companies
+            WHERE id = @Id",
+            new { Id = companyId });
+
+        if (company == null) return null;
+
+        return new Company
+        {
+            Id = (Guid)company.id,
+            UserId = company.user_id != null ? (Guid?)company.user_id : null,
+            ContactEmail = (string?)company.contact_email,
+            CompanyName = (string?)company.company_name ?? string.Empty,
+            Industry = (string?)company.industry,
+            CompanySize = (string?)company.company_size,
+            Website = (string?)company.website,
+            SubscriptionTier = (SubscriptionTier)(int)company.subscription_tier,
+            MessagesRemaining = (int)company.messages_remaining,
+            CreatedAt = (DateTime)company.created_at,
+            UpdatedAt = (DateTime)company.updated_at
+        };
+    }
+
+    private static bool IsCommonEmailDomain(string domain)
+    {
+        var commonDomains = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "live.com",
+            "icloud.com", "me.com", "mac.com", "aol.com", "protonmail.com",
+            "proton.me", "mail.com", "yandex.com", "tutanota.com"
+        };
+        return commonDomains.Contains(domain);
+    }
+
+    private static string CapitalizeDomain(string domain)
+    {
+        // Remove TLD and capitalize first letter
+        var parts = domain.Split('.');
+        var name = parts[0];
+        return char.ToUpperInvariant(name[0]) + name.Substring(1);
     }
 }
