@@ -41,3 +41,4 @@ appsettings.*.local.json
 secrets.json
 secrets.local.json
 appsettings.Development.json
+/nul
