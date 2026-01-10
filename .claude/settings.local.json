@@ -24,7 +24,8 @@
       "Bash(cat:*)",
       "Bash(git check-ignore:*)",
       "Bash(openssl rand:*)",
-      "Bash(timeout 10 dotnet run:*)"
+      "Bash(timeout 10 dotnet run:*)",
+      "Bash(docker build:*)"
     ]
   }
 }
